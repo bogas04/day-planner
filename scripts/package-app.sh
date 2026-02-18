@@ -46,4 +46,11 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "Created app bundle: $APP_DIR"
-echo "To install: cp -R \"$APP_DIR\" /Applications/"
+
+read -r -p "Install to /Applications? (Y/N): " INSTALL_REPLY
+if [[ "$INSTALL_REPLY" =~ ^[Yy]$ ]]; then
+    cp -R "$APP_DIR" /Applications/
+    echo "Installed to /Applications/$APP_NAME.app"
+else
+    echo "Skipped install. To install later: cp -R \"$APP_DIR\" /Applications/"
+fi
