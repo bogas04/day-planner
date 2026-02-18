@@ -1,0 +1,24 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:FocusedDayPlanner}",
+      "name": "Debug FocusedDayPlanner",
+      "target": "FocusedDayPlanner",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug FocusedDayPlanner"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:FocusedDayPlanner}",
+      "name": "Release FocusedDayPlanner",
+      "target": "FocusedDayPlanner",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release FocusedDayPlanner"
+    }
+  ]
+}
