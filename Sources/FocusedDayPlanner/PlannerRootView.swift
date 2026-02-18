@@ -208,6 +208,8 @@ struct PlannerRootView: View {
                         selectedDateKey = plan.dateKey
                     } label: {
                         historyRow(for: plan)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                             .background(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                                     .fill(selectedDateKey == plan.dateKey && detailMode == .day ? Color.accentColor.opacity(0.16) : Color.clear)
@@ -380,6 +382,22 @@ struct PlannerRootView: View {
                             store.updateDayRating(newValue, for: plan)
                         }
                     ))
+                }
+
+                let pendingCount = plan.todos.filter { !$0.isDone }.count
+                if pendingCount > 0 {
+                    HStack(spacing: 8) {
+                        Button("Carry Forward") {
+                            let nextKey = store.carryPendingTodosToNextDay(from: plan)
+                            selectedDateKey = nextKey
+                            detailMode = .day
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.secondary)
+                            .help("Moves all pending tasks to the next day. If the next day doesn't exist, it is created automatically. Moved tasks are marked as Carry.")
+                    }
                 }
             }
         }

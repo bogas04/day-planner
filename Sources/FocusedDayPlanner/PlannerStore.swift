@@ -54,6 +54,35 @@ final class PlannerStore: ObservableObject {
         return key
     }
 
+    @discardableResult
+    func carryPendingTodosToNextDay(from dayPlan: DayPlan, now: Date = .now) -> String {
+        let baseDate = date(from: dayPlan.dateKey) ?? now
+        let nextDate = calendar.date(byAdding: .day, value: 1, to: baseDate) ?? now
+        let nextKey = dateKey(for: nextDate)
+        ensureDayPlan(for: nextKey, now: now)
+
+        guard let destination = fetchDayPlan(for: nextKey) else { return nextKey }
+
+        var nextSort = (destination.todos.map(\.sortOrder).max() ?? -1) + 1
+        let pending = dayPlan.todos
+            .filter { !$0.isDone }
+            .sorted { $0.sortOrder < $1.sortOrder }
+
+        for todo in pending {
+            todo.dayPlan = destination
+            todo.source = .rollover
+            todo.sortOrder = nextSort
+            todo.updatedAt = now
+            nextSort += 1
+        }
+
+        normalizeTodoSortOrder(for: dayPlan, now: now)
+        destination.updatedAt = now
+        dayPlan.updatedAt = now
+        save()
+        return nextKey
+    }
+
     func fetchDayPlan(for dateKey: String) -> DayPlan? {
         let descriptor = FetchDescriptor<DayPlan>(
             predicate: #Predicate<DayPlan> { plan in
