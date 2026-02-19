@@ -7,6 +7,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         NSApp.applicationIconImage = AppIconProvider.dockIcon
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        }
     }
 }
 
@@ -23,7 +28,7 @@ struct FocusedDayPlannerApp: App {
     }()
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        Window("Focused Day Planner", id: "main") {
             PlannerRootView()
         }
         .defaultSize(width: 1180, height: 820)

@@ -5,6 +5,25 @@ APP_NAME="FocusedDayPlanner"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
+INSTALL_DIRECT=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --install)
+            INSTALL_DIRECT=true
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--install]"
+            echo "  --install   Install to /Applications without prompting"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            echo "Usage: $0 [--install]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 cd "$ROOT_DIR"
 swift build -c release
@@ -47,10 +66,15 @@ PLIST
 
 echo "Created app bundle: $APP_DIR"
 
-read -r -p "Install to /Applications? (Y/N): " INSTALL_REPLY
-if [[ "$INSTALL_REPLY" =~ ^[Yy]$ ]]; then
+if [[ "$INSTALL_DIRECT" == true ]]; then
     cp -R "$APP_DIR" /Applications/
     echo "Installed to /Applications/$APP_NAME.app"
 else
-    echo "Skipped install. To install later: cp -R \"$APP_DIR\" /Applications/"
+    read -r -p "Install to /Applications? (Y/N): " INSTALL_REPLY
+    if [[ "$INSTALL_REPLY" =~ ^[Yy]$ ]]; then
+        cp -R "$APP_DIR" /Applications/
+        echo "Installed to /Applications/$APP_NAME.app"
+    else
+        echo "Skipped install. To install later: cp -R \"$APP_DIR\" /Applications/"
+    fi
 fi

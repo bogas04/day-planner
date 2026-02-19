@@ -5,15 +5,17 @@ import SwiftData
 final class DayPlan {
     @Attribute(.unique) var dateKey: String
     var dayRating: Int?
+    var reflection: String?
     var createdAt: Date
     var updatedAt: Date
 
     @Relationship(deleteRule: .cascade, inverse: \TodoItem.dayPlan) var todos: [TodoItem]
     @Relationship(deleteRule: .cascade, inverse: \LinearLink.dayPlan) var linearLinks: [LinearLink]
 
-    init(dateKey: String, dayRating: Int? = nil, createdAt: Date = .now, updatedAt: Date = .now) {
+    init(dateKey: String, dayRating: Int? = nil, reflection: String? = nil, createdAt: Date = .now, updatedAt: Date = .now) {
         self.dateKey = dateKey
         self.dayRating = dayRating
+        self.reflection = reflection
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.todos = []

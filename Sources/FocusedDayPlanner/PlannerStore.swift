@@ -244,6 +244,13 @@ final class PlannerStore: ObservableObject {
         save()
     }
 
+    func updateDayReflection(_ reflection: String, for dayPlan: DayPlan, now: Date = .now) {
+        let trimmed = reflection.trimmingCharacters(in: .whitespacesAndNewlines)
+        dayPlan.reflection = trimmed.isEmpty ? nil : reflection
+        dayPlan.updatedAt = now
+        save()
+    }
+
     @discardableResult
     func updateDayDate(_ dayPlan: DayPlan, to newDateKey: String, now: Date = .now) -> Bool {
         let trimmed = newDateKey.trimmingCharacters(in: .whitespacesAndNewlines)

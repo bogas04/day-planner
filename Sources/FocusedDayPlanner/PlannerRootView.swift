@@ -7,6 +7,7 @@ private enum DetailMode {
     case day
     case todos
     case calendar
+    case stats
     case settings
 }
 
@@ -32,11 +33,24 @@ struct PlannerRootView: View {
     @State private var pendingCarryTodoID: PersistentIdentifier?
     @State private var pendingCarryPlanDateKey: String?
     @State private var draggedTodoToken: String?
+    @State private var reflectionPlaceholderIndex = 0
 
     @State private var calendarMonth: Date = Date()
 
     private let historyLimit = 10
     private let calendar = Calendar.current
+    private let reflectionPrompts = [
+        "What felt meaningful today, even in a small way?",
+        "What are you proud of from today?",
+        "What gave you energy today, and what drained it?",
+        "Which moment would you like to remember from today?",
+        "What did you learn about yourself today?",
+        "What went better than you expected?",
+        "If you could replay one part of today, what would you change?",
+        "What helped you stay focused today?",
+        "What is one gentle improvement for tomorrow?",
+        "What are you grateful for from today?"
+    ]
 
     private var store: PlannerStore {
         PlannerStore(context: modelContext)
@@ -61,6 +75,8 @@ struct PlannerRootView: View {
             return "Todos"
         case .calendar:
             return "Calendar"
+        case .stats:
+            return "Stats"
         case .settings:
             return "Settings"
         case .day:
@@ -175,6 +191,7 @@ struct PlannerRootView: View {
         }
         .onAppear {
             calendarMonth = monthStart(for: .now)
+            reflectionPlaceholderIndex = (reflectionPlaceholderIndex + 1) % reflectionPrompts.count
             if selectedDateKey == nil {
                 if dayPlans.contains(where: { $0.dateKey == todayKey }) {
                     selectedDateKey = todayKey
@@ -188,6 +205,9 @@ struct PlannerRootView: View {
                 }
             }
             store.refreshTodayNotifications()
+        }
+        .onChange(of: selectedDateKey) { _, _ in
+            reflectionPlaceholderIndex = (reflectionPlaceholderIndex + 1) % reflectionPrompts.count
         }
     }
 
@@ -227,6 +247,14 @@ struct PlannerRootView: View {
                 .buttonStyle(.plain)
 
                 Button {
+                    detailMode = .stats
+                } label: {
+                    Label("Stats", systemImage: "chart.bar")
+                        .font(.title3)
+                }
+                .buttonStyle(.plain)
+
+                Button {
                     detailMode = .settings
                 } label: {
                     Label("Settings", systemImage: "gearshape")
@@ -250,6 +278,16 @@ struct PlannerRootView: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .onDrop(
+                        of: [UTType.text.identifier],
+                        delegate: TodoDayMoveDropDelegate(
+                            targetPlan: plan,
+                            dayPlans: dayPlans,
+                            store: store,
+                            draggedToken: $draggedTodoToken,
+                            tokenForTodo: todoDragToken(_:)
+                        )
+                    )
                 }
             }
         }
@@ -287,6 +325,8 @@ struct PlannerRootView: View {
             allTodosView
         case .calendar:
             calendarGridView
+        case .stats:
+            statsView
         case .settings:
             settingsView
         }
@@ -347,6 +387,51 @@ struct PlannerRootView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This removes all days, ratings, and todos from local storage.")
+        }
+    }
+
+    private var statsView: some View {
+        let ratedValues = dayPlans.compactMap(\.dayRating)
+        let overallRating: Double? = ratedValues.isEmpty
+            ? nil
+            : Double(ratedValues.reduce(0) { $0 + $1 }) / Double(ratedValues.count)
+        let thisWeekDonePerDay = averageDonePerDay(weekOffsetFromCurrent: 0)
+        let previousWeekDonePerDay = averageDonePerDay(weekOffsetFromCurrent: -1)
+
+        return ScrollView {
+            sectionCard {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Stats")
+                        .font(.largeTitle)
+                        .fontWeight(.semibold)
+
+                    HStack {
+                        Text("Overall Rating")
+                            .font(.title3)
+                        Spacer()
+                        Text(overallRating.map { String(format: "%.1f/10", $0) } ?? "-")
+                            .font(.title3.weight(.semibold))
+                    }
+
+                    HStack {
+                        Text("Todos Done/Day (This Week)")
+                            .font(.title3)
+                        Spacer()
+                        Text(String(format: "%.1f", thisWeekDonePerDay))
+                            .font(.title3.weight(.semibold))
+                    }
+
+                    HStack {
+                        Text("Todos Done/Day (Previous Week)")
+                            .font(.title3)
+                        Spacer()
+                        Text(String(format: "%.1f", previousWeekDonePerDay))
+                            .font(.title3.weight(.semibold))
+                    }
+                }
+            }
+            .frame(maxWidth: 980, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
 
@@ -416,6 +501,38 @@ struct PlannerRootView: View {
                             store.updateDayRating(newValue, for: plan)
                         }
                     ))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Reflection")
+                        .font(.title3)
+                        .fontWeight(.medium)
+                    ZStack(alignment: .topLeading) {
+                        TextEditor(text: Binding(
+                            get: { plan.reflection ?? "" },
+                            set: { newValue in
+                                store.updateDayReflection(newValue, for: plan)
+                            }
+                        ))
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .frame(minHeight: 78, maxHeight: 78)
+
+                        if (plan.reflection ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(reflectionPrompts[reflectionPlaceholderIndex])
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 6)
+                                .padding(.top, 1)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+                    )
                 }
 
                 let pendingCount = plan.todos.filter { !$0.isDone }.count
@@ -918,6 +1035,20 @@ struct PlannerRootView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d"
         return formatter.string(from: date)
+    }
+
+    private func averageDonePerDay(weekOffsetFromCurrent offset: Int) -> Double {
+        guard let thisWeekInterval = calendar.dateInterval(of: .weekOfYear, for: .now),
+              let start = calendar.date(byAdding: .weekOfYear, value: offset, to: thisWeekInterval.start),
+              let end = calendar.date(byAdding: .day, value: 7, to: start) else {
+            return 0
+        }
+
+        let totalDone = dayPlans.reduce(into: 0) { partialResult, plan in
+            guard let date = store.date(from: plan.dateKey), date >= start, date < end else { return }
+            partialResult += plan.todos.filter(\.isDone).count
+        }
+        return Double(totalDone) / 7.0
     }
 
     private func summaryText(for plan: DayPlan) -> String {
