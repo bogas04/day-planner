@@ -2,6 +2,7 @@ import Foundation
 
 enum AppSettings {
     static let notificationsEnabledKey = "settings.notifications_enabled"
+    static let skipCarryForwardConfirmKey = "settings.skip_carry_forward_confirm"
 
     static var notificationsEnabled: Bool {
         get {

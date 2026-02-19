@@ -179,6 +179,58 @@ final class PlannerStore: ObservableObject {
         save()
     }
 
+    func moveTodo(_ todo: TodoItem, in dayPlan: DayPlan, delta: Int, now: Date = .now) {
+        var sorted = sortedTodos(for: dayPlan)
+        guard let currentIndex = sorted.firstIndex(where: { $0.persistentModelID == todo.persistentModelID }) else {
+            return
+        }
+
+        let targetIndex = max(0, min(sorted.count - 1, currentIndex + delta))
+        guard targetIndex != currentIndex else { return }
+
+        let moving = sorted.remove(at: currentIndex)
+        sorted.insert(moving, at: targetIndex)
+        for (index, item) in sorted.enumerated() {
+            item.sortOrder = index
+            item.updatedAt = now
+        }
+        dayPlan.updatedAt = now
+        save()
+    }
+
+    func moveTodo(_ todo: TodoItem, in dayPlan: DayPlan, to targetIndex: Int, now: Date = .now) {
+        var sorted = sortedTodos(for: dayPlan)
+        guard let currentIndex = sorted.firstIndex(where: { $0.persistentModelID == todo.persistentModelID }) else {
+            return
+        }
+
+        let clampedTarget = max(0, min(sorted.count - 1, targetIndex))
+        guard clampedTarget != currentIndex else { return }
+
+        let moving = sorted.remove(at: currentIndex)
+        sorted.insert(moving, at: clampedTarget)
+        for (index, item) in sorted.enumerated() {
+            item.sortOrder = index
+            item.updatedAt = now
+        }
+        dayPlan.updatedAt = now
+        save()
+    }
+
+    func moveTodo(_ todo: TodoItem, from sourcePlan: DayPlan, to destinationPlan: DayPlan, now: Date = .now) {
+        guard sourcePlan.persistentModelID != destinationPlan.persistentModelID else { return }
+
+        let nextSort = (destinationPlan.todos.map(\.sortOrder).max() ?? -1) + 1
+        todo.dayPlan = destinationPlan
+        todo.sortOrder = nextSort
+        todo.updatedAt = now
+
+        normalizeTodoSortOrder(for: sourcePlan, now: now)
+        destinationPlan.updatedAt = now
+        sourcePlan.updatedAt = now
+        save()
+    }
+
     func sortedTodos(for dayPlan: DayPlan) -> [TodoItem] {
         dayPlan.todos.sorted { $0.sortOrder < $1.sortOrder }
     }
@@ -240,6 +292,29 @@ final class PlannerStore: ObservableObject {
         todo.updatedAt = now
         todo.dayPlan?.updatedAt = now
         save()
+    }
+
+    @discardableResult
+    func carryTodoToNextDay(_ todo: TodoItem, from dayPlan: DayPlan, now: Date = .now) -> String {
+        let baseDate = date(from: dayPlan.dateKey) ?? now
+        let nextDate = calendar.date(byAdding: .day, value: 1, to: baseDate) ?? now
+        let nextKey = dateKey(for: nextDate)
+        ensureDayPlan(for: nextKey, now: now)
+
+        guard let destination = fetchDayPlan(for: nextKey) else { return nextKey }
+        let nextSort = (destination.todos.map(\.sortOrder).max() ?? -1) + 1
+
+        todo.dayPlan = destination
+        todo.source = .rollover
+        todo.isDone = false
+        todo.sortOrder = nextSort
+        todo.updatedAt = now
+
+        normalizeTodoSortOrder(for: dayPlan, now: now)
+        destination.updatedAt = now
+        dayPlan.updatedAt = now
+        save()
+        return nextKey
     }
 
     func deleteAllData(now: Date = .now) {

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum DetailMode {
     case day
@@ -13,6 +14,7 @@ struct PlannerRootView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \DayPlan.dateKey, order: .reverse) private var dayPlans: [DayPlan]
     @AppStorage(AppSettings.notificationsEnabledKey) private var notificationsEnabled = true
+    @AppStorage(AppSettings.skipCarryForwardConfirmKey) private var skipCarryForwardConfirm = false
 
     @State private var selectedDateKey: String?
     @State private var detailMode: DetailMode = .day
@@ -25,6 +27,11 @@ struct PlannerRootView: View {
     @State private var showingDeleteDayConfirmation = false
     @State private var calendarDeleteDayKey: String?
     @State private var showingDeleteAllDataConfirmation = false
+    @State private var showingCarryForwardConfirmation = false
+    @State private var carryForwardDontAskAgain = false
+    @State private var pendingCarryTodoID: PersistentIdentifier?
+    @State private var pendingCarryPlanDateKey: String?
+    @State private var draggedTodoToken: String?
 
     @State private var calendarMonth: Date = Date()
 
@@ -138,6 +145,33 @@ struct PlannerRootView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("The day and rating will be removed. Todos from this day are kept and moved to another day.")
+        }
+        .sheet(isPresented: $showingCarryForwardConfirmation) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Carry this task to next day?")
+                    .font(.headline)
+                Text("This moves the selected task to the next day and marks it as Carry. The next day is created if needed.")
+                    .foregroundStyle(.secondary)
+                Toggle("Don't notify again", isOn: $carryForwardDontAskAgain)
+                    .toggleStyle(.checkbox)
+                HStack {
+                    Button("Cancel") {
+                        showingCarryForwardConfirmation = false
+                        pendingCarryTodoID = nil
+                        pendingCarryPlanDateKey = nil
+                    }
+                    Spacer()
+                    Button("Carry Forward") {
+                        if carryForwardDontAskAgain {
+                            skipCarryForwardConfirm = true
+                        }
+                        executePendingCarryForward()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(16)
+            .frame(width: 420)
         }
         .onAppear {
             calendarMonth = monthStart(for: .now)
@@ -424,9 +458,28 @@ struct PlannerRootView: View {
                 if !todos.isEmpty {
                     LazyVStack(spacing: 10) {
                         ForEach(todos) { todo in
-                            todoRow(todo: todo, plan: plan)
+                            todoRow(
+                                todo: todo,
+                                plan: plan,
+                                showDayActions: true
+                            )
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
+                                .onDrop(
+                                    of: [UTType.text.identifier],
+                                    delegate: TodoReorderDropDelegate(
+                                        target: todo,
+                                        plan: plan,
+                                        store: store,
+                                        draggedToken: $draggedTodoToken,
+                                        tokenForTodo: todoDragToken(_:),
+                                        onMove: { source, target, dayPlan in
+                                            withAnimation(.easeInOut(duration: 0.18)) {
+                                                store.moveTodo(source, in: dayPlan, to: target)
+                                            }
+                                        }
+                                    )
+                                )
                         }
                     }
                     .padding(.vertical, 8)
@@ -443,7 +496,11 @@ struct PlannerRootView: View {
         }
     }
 
-    private func todoRow(todo: TodoItem, plan: DayPlan) -> some View {
+    private func todoRow(
+        todo: TodoItem,
+        plan: DayPlan,
+        showDayActions: Bool
+    ) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Button {
                 todo.isDone.toggle()
@@ -476,6 +533,25 @@ struct PlannerRootView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
+            if showDayActions {
+                Button {
+                    requestCarryForward(todo: todo, in: plan)
+                } label: {
+                    Image(systemName: "arrow.right.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Carry this task to next day")
+
+                Image(systemName: "circle.grid.2x2.fill")
+                    .foregroundStyle(.secondary)
+                    .help("Drag to reorder")
+                    .onDrag {
+                        let token = todoDragToken(todo)
+                        draggedTodoToken = token
+                        return NSItemProvider(object: NSString(string: token))
+                    }
+            }
+
             Button(role: .destructive) {
                 store.deleteTodo(todo, from: plan)
             } label: {
@@ -484,6 +560,38 @@ struct PlannerRootView: View {
             .buttonStyle(.borderless)
         }
         .frame(minHeight: 44)
+    }
+
+    private func requestCarryForward(todo: TodoItem, in plan: DayPlan) {
+        if skipCarryForwardConfirm {
+            _ = store.carryTodoToNextDay(todo, from: plan)
+            return
+        }
+        carryForwardDontAskAgain = skipCarryForwardConfirm
+        pendingCarryTodoID = todo.persistentModelID
+        pendingCarryPlanDateKey = plan.dateKey
+        showingCarryForwardConfirmation = true
+    }
+
+    private func executePendingCarryForward() {
+        defer {
+            showingCarryForwardConfirmation = false
+            pendingCarryTodoID = nil
+            pendingCarryPlanDateKey = nil
+        }
+
+        guard let dayKey = pendingCarryPlanDateKey,
+              let todoID = pendingCarryTodoID,
+              let plan = store.fetchDayPlan(for: dayKey),
+              let todo = plan.todos.first(where: { $0.persistentModelID == todoID }) else {
+            return
+        }
+
+        _ = store.carryTodoToNextDay(todo, from: plan)
+    }
+
+    private func todoDragToken(_ todo: TodoItem) -> String {
+        "\(todo.persistentModelID)"
     }
 
     @ViewBuilder
@@ -613,12 +721,31 @@ struct PlannerRootView: View {
                 } else {
                     LazyVStack(spacing: 8) {
                         ForEach(todos) { todo in
-                            todoRow(todo: todo, plan: plan)
+                            todoRow(
+                                todo: todo,
+                                plan: plan,
+                                showDayActions: false
+                            )
+                            .onDrag {
+                                let token = todoDragToken(todo)
+                                draggedTodoToken = token
+                                return NSItemProvider(object: NSString(string: token))
+                            }
                         }
                     }
                 }
             }
         }
+        .onDrop(
+            of: [UTType.text.identifier],
+            delegate: TodoDayMoveDropDelegate(
+                targetPlan: plan,
+                dayPlans: dayPlans,
+                store: store,
+                draggedToken: $draggedTodoToken,
+                tokenForTodo: todoDragToken(_:)
+            )
+        )
     }
 
     private var calendarGridView: some View {
@@ -823,5 +950,64 @@ private struct StarRatingView: View {
             .buttonStyle(.borderless)
             .font(.subheadline)
         }
+    }
+}
+
+private struct TodoReorderDropDelegate: DropDelegate {
+    let target: TodoItem
+    let plan: DayPlan
+    let store: PlannerStore
+    @Binding var draggedToken: String?
+    let tokenForTodo: (TodoItem) -> String
+    let onMove: (TodoItem, Int, DayPlan) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedToken else { return }
+
+        let todos = store.sortedTodos(for: plan)
+        guard let sourceTodo = todos.first(where: { tokenForTodo($0) == draggedToken }),
+              let fromIndex = todos.firstIndex(where: { $0.persistentModelID == sourceTodo.persistentModelID }),
+              let toIndex = todos.firstIndex(where: { $0.persistentModelID == target.persistentModelID }),
+              fromIndex != toIndex else {
+            return
+        }
+
+        onMove(sourceTodo, toIndex, plan)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedToken = nil
+        return true
+    }
+}
+
+private struct TodoDayMoveDropDelegate: DropDelegate {
+    let targetPlan: DayPlan
+    let dayPlans: [DayPlan]
+    let store: PlannerStore
+    @Binding var draggedToken: String?
+    let tokenForTodo: (TodoItem) -> String
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer { draggedToken = nil }
+        guard let draggedToken else { return false }
+
+        for sourcePlan in dayPlans {
+            guard let todo = sourcePlan.todos.first(where: { tokenForTodo($0) == draggedToken }) else {
+                continue
+            }
+            store.moveTodo(todo, from: sourcePlan, to: targetPlan)
+            return true
+        }
+
+        return false
     }
 }
