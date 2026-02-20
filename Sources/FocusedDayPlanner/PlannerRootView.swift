@@ -16,6 +16,10 @@ struct PlannerRootView: View {
     @Query(sort: \DayPlan.dateKey, order: .reverse) private var dayPlans: [DayPlan]
     @AppStorage(AppSettings.notificationsEnabledKey) private var notificationsEnabled = true
     @AppStorage(AppSettings.skipCarryForwardConfirmKey) private var skipCarryForwardConfirm = false
+    @AppStorage(AppSettings.themeTintRedKey) private var themeTintRed = 0.86
+    @AppStorage(AppSettings.themeTintGreenKey) private var themeTintGreen = 0.76
+    @AppStorage(AppSettings.themeTintBlueKey) private var themeTintBlue = 0.60
+    @AppStorage(AppSettings.themeTintOpacityKey) private var themeTintOpacity = 0.10
 
     @State private var selectedDateKey: String?
     @State private var detailMode: DetailMode = .day
@@ -28,11 +32,16 @@ struct PlannerRootView: View {
     @State private var showingDeleteDayConfirmation = false
     @State private var calendarDeleteDayKey: String?
     @State private var showingDeleteAllDataConfirmation = false
+    @State private var showingDeleteTodoConfirmation = false
+    @State private var pendingDeleteTodoID: PersistentIdentifier?
+    @State private var pendingDeletePlanDateKey: String?
     @State private var showingCarryForwardConfirmation = false
     @State private var carryForwardDontAskAgain = false
     @State private var pendingCarryTodoID: PersistentIdentifier?
     @State private var pendingCarryPlanDateKey: String?
+    @State private var dataTransferMessage: String?
     @State private var draggedTodoToken: String?
+    @State private var decorativeImageCycleOffset = 0
     @State private var reflectionPlaceholderIndex = 0
 
     @State private var calendarMonth: Date = Date()
@@ -72,7 +81,7 @@ struct PlannerRootView: View {
     private var currentTitle: String {
         switch detailMode {
         case .todos:
-            return "Todos"
+            return "All Todos"
         case .calendar:
             return "Calendar"
         case .stats:
@@ -89,12 +98,39 @@ struct PlannerRootView: View {
         Dictionary(uniqueKeysWithValues: dayPlans.map { ($0.dateKey, $0) })
     }
 
+    private var themeTintColor: Color {
+        Color(
+            red: min(max(themeTintRed, 0), 1),
+            green: min(max(themeTintGreen, 0), 1),
+            blue: min(max(themeTintBlue, 0), 1),
+            opacity: min(max(themeTintOpacity, 0), 1)
+        )
+    }
+
+    private var decorativeImage: NSImage? {
+        guard let imageURL = currentDecorativeImageURL,
+              let image = NSImage(contentsOf: imageURL) else {
+            return nil
+        }
+        return image
+    }
+
+    private var currentDecorativeImageURL: URL? {
+        let candidates = decorativeImageCandidateURLs()
+        guard !candidates.isEmpty else { return nil }
+
+        let selectedKey = selectedDateKey ?? todayKey
+        let dayOfMonth = store.date(from: selectedKey).map { calendar.component(.day, from: $0) } ?? 1
+        let baseIndex = max(0, dayOfMonth - 1) % candidates.count
+        let resolvedIndex = (baseIndex + decorativeImageCycleOffset) % candidates.count
+        return candidates[resolvedIndex]
+    }
+
     var body: some View {
         NavigationSplitView {
             sidebar
         } detail: {
             detail
-                .padding(28)
         }
         .navigationTitle(currentTitle)
         .toolbar {
@@ -124,6 +160,14 @@ struct PlannerRootView: View {
             Button("OK", role: .cancel) { dateChangeError = nil }
         } message: {
             Text(dateChangeError ?? "")
+        }
+        .alert("Data Transfer", isPresented: Binding(
+            get: { dataTransferMessage != nil },
+            set: { if !$0 { dataTransferMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { dataTransferMessage = nil }
+        } message: {
+            Text(dataTransferMessage ?? "")
         }
         .confirmationDialog(
             "Delete this day?",
@@ -161,6 +205,21 @@ struct PlannerRootView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("The day and rating will be removed. Todos from this day are kept and moved to another day.")
+        }
+        .confirmationDialog(
+            "Delete this todo?",
+            isPresented: $showingDeleteTodoConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Todo", role: .destructive) {
+                executePendingTodoDelete()
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeleteTodoID = nil
+                pendingDeletePlanDateKey = nil
+            }
+        } message: {
+            Text("This task will be removed permanently.")
         }
         .sheet(isPresented: $showingCarryForwardConfirmation) {
             VStack(alignment: .leading, spacing: 14) {
@@ -207,91 +266,186 @@ struct PlannerRootView: View {
             store.refreshTodayNotifications()
         }
         .onChange(of: selectedDateKey) { _, _ in
+            decorativeImageCycleOffset = 0
             reflectionPlaceholderIndex = (reflectionPlaceholderIndex + 1) % reflectionPrompts.count
         }
     }
 
+    private func decorativeImageCandidateURLs() -> [URL] {
+        let fileManager = FileManager.default
+
+        var candidates: [URL] = []
+        if let resourceURL = Bundle.main.resourceURL,
+           let resourceFiles = try? fileManager.contentsOfDirectory(
+                at: resourceURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+           ) {
+            candidates += resourceFiles.filter { isDecorativeImageFile($0.lastPathComponent) }
+        }
+
+        let localAssetsURL = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("assets", isDirectory: true)
+        if let enumerator = fileManager.enumerator(
+            at: localAssetsURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator where isDecorativeImageFile(fileURL.lastPathComponent) {
+                candidates.append(fileURL)
+            }
+        }
+
+        var seenPaths = Set<String>()
+        let unique = candidates.filter { seenPaths.insert($0.path).inserted }
+        return unique.sorted(by: decorativeImageSort)
+    }
+
+    private func isDecorativeImageFile(_ fileName: String) -> Bool {
+        let lowercased = fileName.lowercased()
+        return lowercased.hasPrefix("image-") && lowercased.hasSuffix(".png")
+    }
+
+    private func decorativeImageSort(lhs: URL, rhs: URL) -> Bool {
+        let lhsName = lhs.lastPathComponent
+        let rhsName = rhs.lastPathComponent
+
+        let lhsNumber = decorativeImageNumber(from: lhsName)
+        let rhsNumber = decorativeImageNumber(from: rhsName)
+
+        switch (lhsNumber, rhsNumber) {
+        case let (left?, right?):
+            if left != right { return left < right }
+            return lhsName.localizedStandardCompare(rhsName) == .orderedAscending
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            return lhsName.localizedStandardCompare(rhsName) == .orderedAscending
+        }
+    }
+
+    private func decorativeImageNumber(from fileName: String) -> Int? {
+        let lowercased = fileName.lowercased()
+        guard lowercased.hasPrefix("image-"), lowercased.hasSuffix(".png") else {
+            return nil
+        }
+
+        let start = lowercased.index(lowercased.startIndex, offsetBy: "image-".count)
+        let end = lowercased.index(lowercased.endIndex, offsetBy: -".png".count)
+        let rawNumber = lowercased[start..<end]
+        return Int(rawNumber)
+    }
+
     private var sidebar: some View {
-        List(selection: $selectedDateKey) {
-            Section("Planner") {
-                Button {
-                    detailMode = .day
-                    selectedDateKey = todayKey
-                    store.ensureDayPlan(for: todayKey)
-                } label: {
-                    Label("Today", systemImage: "calendar")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
+        VStack(spacing: 0) {
+            List(selection: $selectedDateKey) {
+                Section("Planner") {
+                    Button {
+                        detailMode = .day
+                        selectedDateKey = todayKey
+                        store.ensureDayPlan(for: todayKey)
+                    } label: {
+                        Label("Today", systemImage: "calendar")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
 
                 Button {
                     detailMode = .todos
                 } label: {
-                    Label("Todos", systemImage: "checklist")
+                    Label("All Todos", systemImage: "checklist")
                         .font(.title3)
                 }
                 .buttonStyle(.plain)
 
-                Button {
-                    detailMode = .calendar
-                    if let selectedPlan,
-                       let date = store.date(from: selectedPlan.dateKey) {
-                        calendarMonth = monthStart(for: date)
-                    } else {
-                        calendarMonth = monthStart(for: .now)
-                    }
-                } label: {
-                    Label("Calendar", systemImage: "calendar.day.timeline.leading")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    detailMode = .stats
-                } label: {
-                    Label("Stats", systemImage: "chart.bar")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    detailMode = .settings
-                } label: {
-                    Label("Settings", systemImage: "gearshape")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-            }
-
-            Section("History") {
-                ForEach(recentPlans) { plan in
                     Button {
-                        detailMode = .day
-                        selectedDateKey = plan.dateKey
+                        detailMode = .calendar
+                        if let selectedPlan,
+                           let date = store.date(from: selectedPlan.dateKey) {
+                            calendarMonth = monthStart(for: date)
+                        } else {
+                            calendarMonth = monthStart(for: .now)
+                        }
                     } label: {
-                        historyRow(for: plan)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                            .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(selectedDateKey == plan.dateKey && detailMode == .day ? Color.accentColor.opacity(0.16) : Color.clear)
-                            )
+                        Label("Calendar", systemImage: "calendar.day.timeline.leading")
+                            .font(.title3)
                     }
                     .buttonStyle(.plain)
-                    .onDrop(
-                        of: [UTType.text.identifier],
-                        delegate: TodoDayMoveDropDelegate(
-                            targetPlan: plan,
-                            dayPlans: dayPlans,
-                            store: store,
-                            draggedToken: $draggedTodoToken,
-                            tokenForTodo: todoDragToken(_:)
+
+                    Button {
+                        detailMode = .stats
+                    } label: {
+                        Label("Stats", systemImage: "chart.bar")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        detailMode = .settings
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Section("History") {
+                    ForEach(recentPlans) { plan in
+                        Button {
+                            detailMode = .day
+                            selectedDateKey = plan.dateKey
+                        } label: {
+                            historyRow(for: plan)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(selectedDateKey == plan.dateKey && detailMode == .day ? Color.accentColor.opacity(0.16) : Color.clear)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .onDrop(
+                            of: [UTType.text.identifier],
+                            delegate: TodoDayMoveDropDelegate(
+                                targetPlan: plan,
+                                dayPlans: dayPlans,
+                                store: store,
+                                draggedToken: $draggedTodoToken,
+                                tokenForTodo: todoDragToken(_:)
+                            )
                         )
-                    )
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                calendarDeleteDayKey = plan.dateKey
+                            } label: {
+                                Label("Delete Day", systemImage: "trash")
+                            }
+                        }
+                    }
                 }
             }
+            .listStyle(.sidebar)
+
+            if let decorativeImage {
+                Button {
+                    let count = decorativeImageCandidateURLs().count
+                    guard count > 1 else { return }
+                    decorativeImageCycleOffset = (decorativeImageCycleOffset + 1) % count
+                } label: {
+                    Image(nsImage: decorativeImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .opacity(0.92)
+                        .accessibilityHidden(true)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+            }
         }
-        .listStyle(.sidebar)
     }
 
     private func historyRow(for plan: DayPlan) -> some View {
@@ -356,12 +510,63 @@ struct PlannerRootView: View {
                     }
                     .toggleStyle(.switch)
 
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Theme Tint")
+                            .font(.title3)
+                        ColorPicker(
+                            "Shade Color",
+                            selection: Binding(
+                                get: { themeTintColor },
+                                set: { newValue in
+                                    guard let color = NSColor(newValue).usingColorSpace(.sRGB) else { return }
+                                    var red: CGFloat = 0
+                                    var green: CGFloat = 0
+                                    var blue: CGFloat = 0
+                                    var alpha: CGFloat = 0
+                                    color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+                                    themeTintRed = Double(red)
+                                    themeTintGreen = Double(green)
+                                    themeTintBlue = Double(blue)
+                                    themeTintOpacity = Double(alpha)
+                                }
+                            ),
+                            supportsOpacity: true
+                        )
+                        .labelsHidden()
+
+                        HStack(spacing: 10) {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(themeTintColor)
+                                .frame(width: 42, height: 24)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+                                )
+                            Text("Subtle tint for translucent cards")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
                     Button("Open Storage Directory") {
                         if let directory = PersistenceController.storeDirectoryURL() {
                             NSWorkspace.shared.open(directory)
                         }
                     }
                     .buttonStyle(.bordered)
+
+                    HStack(spacing: 10) {
+                        Button("Export Data (JSON)") {
+                            exportDataJSON()
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button("Import Data (JSON)") {
+                            importDataJSON()
+                        }
+                        .buttonStyle(.bordered)
+                        .help("Import replaces all current days, todos, and links.")
+                    }
 
                     Divider()
 
@@ -371,6 +576,7 @@ struct PlannerRootView: View {
                     .buttonStyle(.borderedProminent)
                 }
             }
+            .padding(28)
             .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -430,6 +636,7 @@ struct PlannerRootView: View {
                     }
                 }
             }
+            .padding(28)
             .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -441,6 +648,7 @@ struct PlannerRootView: View {
                 header(for: plan)
                 todoSection(for: plan)
             }
+            .padding(28)
             .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -575,13 +783,12 @@ struct PlannerRootView: View {
                 if !todos.isEmpty {
                     LazyVStack(spacing: 10) {
                         ForEach(todos) { todo in
-                            todoRow(
-                                todo: todo,
-                                plan: plan,
-                                showDayActions: true
-                            )
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
+                                todoRow(
+                                    todo: todo,
+                                    plan: plan,
+                                    showDayActions: true
+                                )
+                                .padding(10)
                                 .onDrop(
                                     of: [UTType.text.identifier],
                                     delegate: TodoReorderDropDelegate(
@@ -670,7 +877,7 @@ struct PlannerRootView: View {
             }
 
             Button(role: .destructive) {
-                store.deleteTodo(todo, from: plan)
+                requestDeleteTodo(todo: todo, in: plan)
             } label: {
                 Image(systemName: "trash")
             }
@@ -688,6 +895,29 @@ struct PlannerRootView: View {
         pendingCarryTodoID = todo.persistentModelID
         pendingCarryPlanDateKey = plan.dateKey
         showingCarryForwardConfirmation = true
+    }
+
+    private func requestDeleteTodo(todo: TodoItem, in plan: DayPlan) {
+        pendingDeleteTodoID = todo.persistentModelID
+        pendingDeletePlanDateKey = plan.dateKey
+        showingDeleteTodoConfirmation = true
+    }
+
+    private func executePendingTodoDelete() {
+        defer {
+            showingDeleteTodoConfirmation = false
+            pendingDeleteTodoID = nil
+            pendingDeletePlanDateKey = nil
+        }
+
+        guard let dayKey = pendingDeletePlanDateKey,
+              let todoID = pendingDeleteTodoID,
+              let plan = store.fetchDayPlan(for: dayKey),
+              let todo = plan.todos.first(where: { $0.persistentModelID == todoID }) else {
+            return
+        }
+
+        store.deleteTodo(todo, from: plan)
     }
 
     private func executePendingCarryForward() {
@@ -789,7 +1019,7 @@ struct PlannerRootView: View {
     private var allTodosView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                Text("Todos")
+                Text("All Todos")
                     .font(.largeTitle)
                     .fontWeight(.semibold)
 
@@ -801,6 +1031,7 @@ struct PlannerRootView: View {
                     }
                 }
             }
+            .padding(28)
             .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -947,8 +1178,48 @@ struct PlannerRootView: View {
                     }
                 }
             }
+            .padding(28)
             .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private func exportDataJSON() {
+        let panel = NSSavePanel()
+        panel.title = "Export Planner Data"
+        panel.nameFieldStringValue = "focused-day-planner-\(todayKey).json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let data = try store.exportSnapshotJSON()
+            try data.write(to: url, options: .atomic)
+            dataTransferMessage = "Export complete:\n\(url.path)"
+        } catch {
+            dataTransferMessage = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func importDataJSON() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Planner Data"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let importedDayCount = try store.importSnapshotJSON(data)
+            selectedDateKey = store.latestDayKey()
+            detailMode = .day
+            dataTransferMessage = "Import complete: \(importedDayCount) day(s) loaded."
+        } catch {
+            dataTransferMessage = "Import failed: \(error.localizedDescription)"
         }
     }
 
@@ -956,6 +1227,11 @@ struct PlannerRootView: View {
         content()
             .padding(20)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(themeTintColor)
+                    .allowsHitTesting(false)
+            )
     }
 
     private func formattedTodoText(from parsed: ParsedTodoLink) -> String {

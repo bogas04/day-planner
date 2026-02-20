@@ -92,6 +92,13 @@ final class PlannerStore: ObservableObject {
         return try? context.fetch(descriptor).first
     }
 
+    func latestDayKey() -> String? {
+        var descriptor = FetchDescriptor<DayPlan>()
+        descriptor.sortBy = [SortDescriptor(\DayPlan.dateKey, order: .reverse)]
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first?.dateKey
+    }
+
     func mostRecentPlan(before dateKey: String) -> DayPlan? {
         var descriptor = FetchDescriptor<DayPlan>(
             predicate: #Predicate<DayPlan> { plan in
@@ -336,6 +343,115 @@ final class PlannerStore: ObservableObject {
         save()
     }
 
+    func exportSnapshotJSON() throws -> Data {
+        var dayDescriptor = FetchDescriptor<DayPlan>()
+        dayDescriptor.sortBy = [SortDescriptor(\DayPlan.dateKey, order: .forward)]
+        let days = try context.fetch(dayDescriptor)
+
+        let snapshot = PlannerSnapshotDTO(
+            schemaVersion: 1,
+            exportedAt: .now,
+            days: days.map { plan in
+                PlannerSnapshotDayDTO(
+                    dateKey: plan.dateKey,
+                    dayRating: plan.dayRating,
+                    reflection: plan.reflection,
+                    createdAt: plan.createdAt,
+                    updatedAt: plan.updatedAt,
+                    todos: plan.todos
+                        .sorted { $0.sortOrder < $1.sortOrder }
+                        .map { todo in
+                            PlannerSnapshotTodoDTO(
+                                title: todo.title,
+                                priorityRaw: todo.priorityRaw,
+                                isDone: todo.isDone,
+                                sortOrder: todo.sortOrder,
+                                sourceRaw: todo.sourceRaw,
+                                createdAt: todo.createdAt,
+                                updatedAt: todo.updatedAt
+                            )
+                        },
+                    linearLinks: plan.linearLinks
+                        .sorted { $0.sortOrder < $1.sortOrder }
+                        .map { link in
+                            PlannerSnapshotLinkDTO(
+                                url: link.url,
+                                displayText: link.displayText,
+                                sortOrder: link.sortOrder,
+                                createdAt: link.createdAt,
+                                updatedAt: link.updatedAt
+                            )
+                        }
+                )
+            }
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(snapshot)
+    }
+
+    @discardableResult
+    func importSnapshotJSON(_ data: Data, now: Date = .now) throws -> Int {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let snapshot = try decoder.decode(PlannerSnapshotDTO.self, from: data)
+        guard snapshot.schemaVersion == 1 else {
+            throw PlannerSnapshotError.unsupportedSchema(snapshot.schemaVersion)
+        }
+
+        let todoDescriptor = FetchDescriptor<TodoItem>()
+        let linkDescriptor = FetchDescriptor<LinearLink>()
+        let dayDescriptor = FetchDescriptor<DayPlan>()
+        try context.fetch(todoDescriptor).forEach { context.delete($0) }
+        try context.fetch(linkDescriptor).forEach { context.delete($0) }
+        try context.fetch(dayDescriptor).forEach { context.delete($0) }
+
+        for day in snapshot.days {
+            let plan = DayPlan(
+                dateKey: day.dateKey,
+                dayRating: day.dayRating,
+                reflection: day.reflection,
+                createdAt: day.createdAt,
+                updatedAt: day.updatedAt
+            )
+            context.insert(plan)
+
+            for todo in day.todos.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+                let item = TodoItem(
+                    title: todo.title,
+                    priority: Priority(rawValue: todo.priorityRaw) ?? .medium,
+                    isDone: todo.isDone,
+                    sortOrder: todo.sortOrder,
+                    source: TodoSource(rawValue: todo.sourceRaw) ?? .manual,
+                    createdAt: todo.createdAt,
+                    updatedAt: todo.updatedAt,
+                    dayPlan: plan
+                )
+                context.insert(item)
+                plan.todos.append(item)
+            }
+
+            for link in day.linearLinks.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+                let item = LinearLink(
+                    url: link.url,
+                    displayText: link.displayText,
+                    sortOrder: link.sortOrder,
+                    createdAt: link.createdAt,
+                    updatedAt: link.updatedAt,
+                    dayPlan: plan
+                )
+                context.insert(item)
+                plan.linearLinks.append(item)
+            }
+        }
+
+        try context.save()
+        refreshTodayNotifications(now: now)
+        return snapshot.days.count
+    }
+
     func addLinearLink(url: String, to dayPlan: DayPlan, now: Date = .now) -> Bool {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parsed = URL(string: trimmed), let scheme = parsed.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
@@ -396,6 +512,51 @@ final class PlannerStore: ObservableObject {
             refreshTodayNotifications()
         } catch {
             assertionFailure("Failed to save planner data: \(error)")
+        }
+    }
+}
+
+private struct PlannerSnapshotDTO: Codable {
+    let schemaVersion: Int
+    let exportedAt: Date
+    let days: [PlannerSnapshotDayDTO]
+}
+
+private struct PlannerSnapshotDayDTO: Codable {
+    let dateKey: String
+    let dayRating: Int?
+    let reflection: String?
+    let createdAt: Date
+    let updatedAt: Date
+    let todos: [PlannerSnapshotTodoDTO]
+    let linearLinks: [PlannerSnapshotLinkDTO]
+}
+
+private struct PlannerSnapshotTodoDTO: Codable {
+    let title: String
+    let priorityRaw: String
+    let isDone: Bool
+    let sortOrder: Int
+    let sourceRaw: String
+    let createdAt: Date
+    let updatedAt: Date
+}
+
+private struct PlannerSnapshotLinkDTO: Codable {
+    let url: String
+    let displayText: String
+    let sortOrder: Int
+    let createdAt: Date
+    let updatedAt: Date
+}
+
+enum PlannerSnapshotError: LocalizedError {
+    case unsupportedSchema(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case let .unsupportedSchema(version):
+            return "Unsupported snapshot schema version: \(version)"
         }
     }
 }

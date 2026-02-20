@@ -35,6 +35,10 @@ mkdir -p "$APP_DIR/Contents/Resources"
 cp ".build/release/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 
+while IFS= read -r -d '' IMAGE_FILE; do
+    cp "$IMAGE_FILE" "$APP_DIR/Contents/Resources/$(basename "$IMAGE_FILE")"
+done < <(find "$ROOT_DIR/assets" -type f -name 'image-*.png' -print0 2>/dev/null || true)
+
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
