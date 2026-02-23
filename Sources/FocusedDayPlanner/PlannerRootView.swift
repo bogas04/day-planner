@@ -42,7 +42,13 @@ struct PlannerRootView: View {
     @State private var dataTransferMessage: String?
     @State private var draggedTodoToken: String?
     @State private var decorativeImageCycleOffset = 0
+    @State private var decorativeImageBloomColor = Color.accentColor.opacity(0.35)
+    @State private var imagePanelFraction: CGFloat = 0.33
+    @State private var imagePanelDragStartFraction: CGFloat?
     @State private var reflectionPlaceholderIndex = 0
+    @State private var hoveredInlineEditTodoID: PersistentIdentifier?
+    @State private var imageDividerHoverCursorActive = false
+    @FocusState private var focusedLinkedTodoID: PersistentIdentifier?
 
     @State private var calendarMonth: Date = Date()
 
@@ -263,11 +269,16 @@ struct PlannerRootView: View {
                     calendarMonth = monthStart(for: date)
                 }
             }
+            refreshDecorativeImageBloomColor()
             store.refreshTodayNotifications()
         }
         .onChange(of: selectedDateKey) { _, _ in
             decorativeImageCycleOffset = 0
             reflectionPlaceholderIndex = (reflectionPlaceholderIndex + 1) % reflectionPrompts.count
+            refreshDecorativeImageBloomColor()
+        }
+        .onChange(of: decorativeImageCycleOffset) { _, _ in
+            refreshDecorativeImageBloomColor()
         }
     }
 
@@ -338,113 +349,238 @@ struct PlannerRootView: View {
         return Int(rawNumber)
     }
 
+    private func refreshDecorativeImageBloomColor() {
+        guard let image = decorativeImage, let dominant = dominantColor(for: image) else {
+            decorativeImageBloomColor = Color.accentColor.opacity(0.35)
+            return
+        }
+
+        decorativeImageBloomColor = Color(
+            red: dominant.red,
+            green: dominant.green,
+            blue: dominant.blue,
+            opacity: 0.45
+        )
+    }
+
+    private func dominantColor(for image: NSImage) -> (red: Double, green: Double, blue: Double)? {
+        guard let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData) else {
+            return nil
+        }
+
+        let width = bitmap.pixelsWide
+        let height = bitmap.pixelsHigh
+        guard width > 0, height > 0 else { return nil }
+
+        let xStep = max(1, width / 64)
+        let yStep = max(1, height / 64)
+
+        var buckets: [Int: (count: Int, red: Double, green: Double, blue: Double)] = [:]
+
+        for y in stride(from: 0, to: height, by: yStep) {
+            for x in stride(from: 0, to: width, by: xStep) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+                    continue
+                }
+                if color.alphaComponent < 0.1 {
+                    continue
+                }
+
+                let r = Double(color.redComponent)
+                let g = Double(color.greenComponent)
+                let b = Double(color.blueComponent)
+                let rBin = Int(r * 15)
+                let gBin = Int(g * 15)
+                let bBin = Int(b * 15)
+                let key = (rBin << 8) | (gBin << 4) | bBin
+
+                let existing = buckets[key] ?? (count: 0, red: 0, green: 0, blue: 0)
+                buckets[key] = (
+                    count: existing.count + 1,
+                    red: existing.red + r,
+                    green: existing.green + g,
+                    blue: existing.blue + b
+                )
+            }
+        }
+
+        guard let bucket = buckets.max(by: { $0.value.count < $1.value.count })?.value,
+              bucket.count > 0 else {
+            return nil
+        }
+
+        let count = Double(bucket.count)
+        return (
+            red: bucket.red / count,
+            green: bucket.green / count,
+            blue: bucket.blue / count
+        )
+    }
+
     private var sidebar: some View {
-        VStack(spacing: 0) {
-            List(selection: $selectedDateKey) {
-                Section("Planner") {
-                    Button {
-                        detailMode = .day
-                        selectedDateKey = todayKey
-                        store.ensureDayPlan(for: todayKey)
-                    } label: {
-                        Label("Today", systemImage: "calendar")
-                            .font(.title3)
-                    }
-                    .buttonStyle(.plain)
+        GeometryReader { geometry in
+            let totalHeight = max(geometry.size.height, 1)
+            let separatorHeight: CGFloat = 14
+            let minImageHeight: CGFloat = 120
+            let maxImageHeight = max(minImageHeight, totalHeight * 0.65)
+            let imageHeight = min(max(totalHeight * imagePanelFraction, minImageHeight), maxImageHeight)
 
-                Button {
-                    detailMode = .todos
-                } label: {
-                    Label("All Todos", systemImage: "checklist")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-
-                    Button {
-                        detailMode = .calendar
-                        if let selectedPlan,
-                           let date = store.date(from: selectedPlan.dateKey) {
-                            calendarMonth = monthStart(for: date)
-                        } else {
-                            calendarMonth = monthStart(for: .now)
-                        }
-                    } label: {
-                        Label("Calendar", systemImage: "calendar.day.timeline.leading")
-                            .font(.title3)
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        detailMode = .stats
-                    } label: {
-                        Label("Stats", systemImage: "chart.bar")
-                            .font(.title3)
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        detailMode = .settings
-                    } label: {
-                        Label("Settings", systemImage: "gearshape")
-                            .font(.title3)
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                Section("History") {
-                    ForEach(recentPlans) { plan in
+            VStack(spacing: 0) {
+                List(selection: $selectedDateKey) {
+                    Section("Planner") {
                         Button {
                             detailMode = .day
-                            selectedDateKey = plan.dateKey
+                            selectedDateKey = todayKey
+                            store.ensureDayPlan(for: todayKey)
                         } label: {
-                            historyRow(for: plan)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(selectedDateKey == plan.dateKey && detailMode == .day ? Color.accentColor.opacity(0.16) : Color.clear)
-                                )
+                            Label("Today", systemImage: "calendar")
+                                .font(.title3)
                         }
                         .buttonStyle(.plain)
-                        .onDrop(
-                            of: [UTType.text.identifier],
-                            delegate: TodoDayMoveDropDelegate(
-                                targetPlan: plan,
-                                dayPlans: dayPlans,
-                                store: store,
-                                draggedToken: $draggedTodoToken,
-                                tokenForTodo: todoDragToken(_:)
-                            )
-                        )
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                calendarDeleteDayKey = plan.dateKey
+
+                    Button {
+                        detailMode = .todos
+                    } label: {
+                        Label("All Todos", systemImage: "checklist")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+
+                        Button {
+                            detailMode = .calendar
+                            if let selectedPlan,
+                               let date = store.date(from: selectedPlan.dateKey) {
+                                calendarMonth = monthStart(for: date)
+                            } else {
+                                calendarMonth = monthStart(for: .now)
+                            }
+                        } label: {
+                            Label("Calendar", systemImage: "calendar.day.timeline.leading")
+                                .font(.title3)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            detailMode = .stats
+                        } label: {
+                            Label("Stats", systemImage: "chart.bar")
+                                .font(.title3)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            detailMode = .settings
+                        } label: {
+                            Label("Settings", systemImage: "gearshape")
+                                .font(.title3)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Section("History") {
+                        ForEach(recentPlans) { plan in
+                            Button {
+                                detailMode = .day
+                                selectedDateKey = plan.dateKey
                             } label: {
-                                Label("Delete Day", systemImage: "trash")
+                                historyRow(for: plan)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .fill(selectedDateKey == plan.dateKey && detailMode == .day ? Color.accentColor.opacity(0.16) : Color.clear)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .onDrop(
+                                of: [UTType.text.identifier],
+                                delegate: TodoDayMoveDropDelegate(
+                                    targetPlan: plan,
+                                    dayPlans: dayPlans,
+                                    store: store,
+                                    draggedToken: $draggedTodoToken,
+                                    tokenForTodo: todoDragToken(_:)
+                                )
+                            )
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    calendarDeleteDayKey = plan.dateKey
+                                } label: {
+                                    Label("Delete Day", systemImage: "trash")
+                                }
                             }
                         }
                     }
                 }
-            }
-            .listStyle(.sidebar)
+                .listStyle(.sidebar)
 
-            if let decorativeImage {
-                Button {
-                    let count = decorativeImageCandidateURLs().count
-                    guard count > 1 else { return }
-                    decorativeImageCycleOffset = (decorativeImageCycleOffset + 1) % count
-                } label: {
-                    Image(nsImage: decorativeImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .opacity(0.92)
-                        .accessibilityHidden(true)
+                if let decorativeImage {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(height: separatorHeight)
+                        .overlay(alignment: .center) {
+                            Divider()
+                                .overlay(Color.primary.opacity(0.22))
+                        }
+                        .overlay(alignment: .center) {
+                            Capsule()
+                                .fill(Color.secondary.opacity(0.35))
+                                .frame(width: 44, height: 4)
+                        }
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    if imagePanelDragStartFraction == nil {
+                                        imagePanelDragStartFraction = imagePanelFraction
+                                    }
+                                    let start = imagePanelDragStartFraction ?? imagePanelFraction
+                                    let updated = start - (value.translation.height / totalHeight)
+                                    imagePanelFraction = min(max(updated, 0.18), 0.65)
+                                }
+                                .onEnded { _ in
+                                    imagePanelDragStartFraction = nil
+                                }
+                        )
+                        .onHover { hovering in
+                            updateImageDividerCursor(hovering: hovering)
+                        }
+                        .onDisappear {
+                            updateImageDividerCursor(hovering: false)
+                        }
+
+                    Button {
+                        let count = decorativeImageCandidateURLs().count
+                        guard count > 1 else { return }
+                        decorativeImageCycleOffset = (decorativeImageCycleOffset + 1) % count
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(decorativeImageBloomColor)
+                                .frame(width: 176, height: 176)
+                                .blur(radius: 28)
+                                .opacity(0.22)
+                                .offset(y: 10)
+                                .allowsHitTesting(false)
+
+                            Image(nsImage: decorativeImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                                .opacity(0.92)
+                                .accessibilityHidden(true)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: imageHeight)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 10)
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
 
@@ -838,21 +974,6 @@ struct PlannerRootView: View {
 
             todoContent(todo: todo)
 
-            Picker("", selection: Binding(
-                get: { todo.priority },
-                set: { newValue in
-                    todo.priority = newValue
-                    store.touchTodo(todo)
-                }
-            )) {
-                ForEach(Priority.allCases, id: \.self) { priority in
-                    Text(priority.displayName).tag(priority)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .frame(width: 230)
-
             Text(todo.source == .rollover ? "Carry" : "New")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -944,7 +1065,7 @@ struct PlannerRootView: View {
     @ViewBuilder
     private func todoContent(todo: TodoItem) -> some View {
         if let parsed = TodoTextFormatter.parseFirstURL(from: todo.title), !editingLinkedTodos.contains(todo.persistentModelID) {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
                 Button {
                     NSWorkspace.shared.open(parsed.url)
                 } label: {
@@ -952,23 +1073,32 @@ struct PlannerRootView: View {
                         .font(.title3)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .multilineTextAlignment(.leading)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(Color(nsColor: .textBackgroundColor).opacity(0.8))
-                )
 
                 Button {
-                    editingLinkedTodos.insert(todo.persistentModelID)
+                    beginLinkedTodoEdit(todoID: todo.persistentModelID)
                 } label: {
-                    Image(systemName: "pencil")
+                    Text("Edit")
+                        .font(.subheadline.weight(.semibold))
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(InlineEditButtonStyle(
+                    isHovered: hoveredInlineEditTodoID == todo.persistentModelID
+                ))
+                .onHover { hovering in
+                    hoveredInlineEditTodoID = hovering ? todo.persistentModelID : nil
+                }
                 .help("Edit linked todo")
+                .padding(.trailing, 10)
             }
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.8))
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
         } else if TodoTextFormatter.parseFirstURL(from: todo.title) != nil {
             VStack(alignment: .leading, spacing: 8) {
@@ -986,6 +1116,7 @@ struct PlannerRootView: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.gray.opacity(0.15))
                 )
+                .focused($focusedLinkedTodoID, equals: todo.persistentModelID)
 
                 HStack {
                     Spacer()
@@ -1013,6 +1144,23 @@ struct PlannerRootView: View {
                     .fill(Color(nsColor: .textBackgroundColor).opacity(0.8))
             )
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func beginLinkedTodoEdit(todoID: PersistentIdentifier) {
+        editingLinkedTodos.insert(todoID)
+        DispatchQueue.main.async {
+            focusedLinkedTodoID = todoID
+        }
+    }
+
+    private func updateImageDividerCursor(hovering: Bool) {
+        if hovering && !imageDividerHoverCursorActive {
+            imageDividerHoverCursorActive = true
+            NSCursor.resizeLeftRight.push()
+        } else if !hovering && imageDividerHoverCursorActive {
+            imageDividerHoverCursorActive = false
+            NSCursor.pop()
         }
     }
 
@@ -1389,6 +1537,33 @@ private struct TodoReorderDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         draggedToken = nil
         return true
+    }
+}
+
+private struct InlineEditButtonStyle: ButtonStyle {
+    let isHovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let isPressed = configuration.isPressed
+        let foreground = isPressed ? Color.accentColor.opacity(0.95) : Color.accentColor
+        let backgroundOpacity: CGFloat = isPressed ? 0.45 : (isHovered ? 0.30 : 0.20)
+        let borderOpacity: CGFloat = isPressed ? 0.55 : (isHovered ? 0.45 : 0.30)
+
+        return configuration.label
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.accentColor.opacity(backgroundOpacity))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.accentColor.opacity(borderOpacity), lineWidth: 1)
+            )
+            .scaleEffect(isPressed ? 0.97 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
     }
 }
 

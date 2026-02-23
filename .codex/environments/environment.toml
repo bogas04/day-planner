@@ -13,4 +13,8 @@ command = "swift run"
 [[actions]]
 name = "Install"
 icon = "test"
-command = "./scripts/package-app.sh --install"
+command = '''
+./scripts/package-app.sh --install
+killall FocusedDayPlanner
+open /Applications/FocusedDayPlanner.app
+'''

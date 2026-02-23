@@ -63,17 +63,24 @@ final class PlannerStore: ObservableObject {
 
         guard let destination = fetchDayPlan(for: nextKey) else { return nextKey }
 
-        var nextSort = (destination.todos.map(\.sortOrder).max() ?? -1) + 1
         let pending = dayPlan.todos
             .filter { !$0.isDone }
             .sorted { $0.sortOrder < $1.sortOrder }
 
-        for todo in pending {
+        guard !pending.isEmpty else { return nextKey }
+
+        let shift = pending.count
+        for existing in destination.todos {
+            existing.sortOrder += shift
+            existing.updatedAt = now
+        }
+
+        for (index, todo) in pending.enumerated() {
             todo.dayPlan = destination
             todo.source = .rollover
-            todo.sortOrder = nextSort
+            todo.isDone = false
+            todo.sortOrder = index
             todo.updatedAt = now
-            nextSort += 1
         }
 
         normalizeTodoSortOrder(for: dayPlan, now: now)
@@ -316,12 +323,15 @@ final class PlannerStore: ObservableObject {
         ensureDayPlan(for: nextKey, now: now)
 
         guard let destination = fetchDayPlan(for: nextKey) else { return nextKey }
-        let nextSort = (destination.todos.map(\.sortOrder).max() ?? -1) + 1
+        for existing in destination.todos {
+            existing.sortOrder += 1
+            existing.updatedAt = now
+        }
 
         todo.dayPlan = destination
         todo.source = .rollover
         todo.isDone = false
-        todo.sortOrder = nextSort
+        todo.sortOrder = 0
         todo.updatedAt = now
 
         normalizeTodoSortOrder(for: dayPlan, now: now)
