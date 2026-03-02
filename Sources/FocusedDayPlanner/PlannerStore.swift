@@ -55,9 +55,17 @@ final class PlannerStore: ObservableObject {
     }
 
     @discardableResult
-    func carryPendingTodosToNextDay(from dayPlan: DayPlan, now: Date = .now) -> String {
+    func carryPendingTodosToNextDay(
+        from dayPlan: DayPlan,
+        now: Date = .now,
+        ignoreWeekends: Bool = AppSettings.ignoreCarryForwardWeekends
+    ) -> String {
         let baseDate = date(from: dayPlan.dateKey) ?? now
-        let nextDate = calendar.date(byAdding: .day, value: 1, to: baseDate) ?? now
+        let nextDate = PlannerRules.nextCarryForwardDate(
+            after: baseDate,
+            calendar: calendar,
+            ignoreWeekends: ignoreWeekends
+        )
         let nextKey = dateKey(for: nextDate)
         ensureDayPlan(for: nextKey, now: now)
 
@@ -316,9 +324,18 @@ final class PlannerStore: ObservableObject {
     }
 
     @discardableResult
-    func carryTodoToNextDay(_ todo: TodoItem, from dayPlan: DayPlan, now: Date = .now) -> String {
+    func carryTodoToNextDay(
+        _ todo: TodoItem,
+        from dayPlan: DayPlan,
+        now: Date = .now,
+        ignoreWeekends: Bool = AppSettings.ignoreCarryForwardWeekends
+    ) -> String {
         let baseDate = date(from: dayPlan.dateKey) ?? now
-        let nextDate = calendar.date(byAdding: .day, value: 1, to: baseDate) ?? now
+        let nextDate = PlannerRules.nextCarryForwardDate(
+            after: baseDate,
+            calendar: calendar,
+            ignoreWeekends: ignoreWeekends
+        )
         let nextKey = dateKey(for: nextDate)
         ensureDayPlan(for: nextKey, now: now)
 

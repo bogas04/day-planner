@@ -8,6 +8,7 @@ private enum DetailMode {
     case todos
     case calendar
     case stats
+    case journal
     case settings
 }
 
@@ -16,6 +17,7 @@ struct PlannerRootView: View {
     @Query(sort: \DayPlan.dateKey, order: .reverse) private var dayPlans: [DayPlan]
     @AppStorage(AppSettings.notificationsEnabledKey) private var notificationsEnabled = true
     @AppStorage(AppSettings.skipCarryForwardConfirmKey) private var skipCarryForwardConfirm = false
+    @AppStorage(AppSettings.ignoreCarryForwardWeekendsKey) private var ignoreCarryForwardWeekends = true
     @AppStorage(AppSettings.themeTintRedKey) private var themeTintRed = 0.86
     @AppStorage(AppSettings.themeTintGreenKey) private var themeTintGreen = 0.76
     @AppStorage(AppSettings.themeTintBlueKey) private var themeTintBlue = 0.60
@@ -51,8 +53,10 @@ struct PlannerRootView: View {
     @FocusState private var focusedLinkedTodoID: PersistentIdentifier?
 
     @State private var calendarMonth: Date = Date()
+    @State private var journalPage = 0
 
     private let historyLimit = 10
+    private let journalPageSize = 10
     private let calendar = Calendar.current
     private let reflectionPrompts = [
         "What felt meaningful today, even in a small way?",
@@ -92,6 +96,8 @@ struct PlannerRootView: View {
             return "Calendar"
         case .stats:
             return "Stats"
+        case .journal:
+            return "Journal"
         case .settings:
             return "Settings"
         case .day:
@@ -279,6 +285,9 @@ struct PlannerRootView: View {
         }
         .onChange(of: decorativeImageCycleOffset) { _, _ in
             refreshDecorativeImageBloomColor()
+        }
+        .onChange(of: dayPlans.count) { _, _ in
+            clampJournalPage()
         }
     }
 
@@ -470,6 +479,15 @@ struct PlannerRootView: View {
                         .buttonStyle(.plain)
 
                         Button {
+                            detailMode = .journal
+                            clampJournalPage()
+                        } label: {
+                            Label("Journal", systemImage: "book.closed")
+                                .font(.title3)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
                             detailMode = .settings
                         } label: {
                             Label("Settings", systemImage: "gearshape")
@@ -617,6 +635,8 @@ struct PlannerRootView: View {
             calendarGridView
         case .stats:
             statsView
+        case .journal:
+            journalView
         case .settings:
             settingsView
         }
@@ -645,6 +665,9 @@ struct PlannerRootView: View {
                             .font(.title3)
                     }
                     .toggleStyle(.switch)
+
+                    Toggle("Ignore Weekends for Carry Forward", isOn: $ignoreCarryForwardWeekends)
+                        .toggleStyle(.switch)
 
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Theme Tint")
@@ -778,6 +801,112 @@ struct PlannerRootView: View {
         }
     }
 
+    private var journalView: some View {
+        let totalDays = dayPlans.count
+        let startIndex = min(journalPage * journalPageSize, totalDays)
+        let endIndex = min(startIndex + journalPageSize, totalDays)
+
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Journal")
+                            .font(.largeTitle)
+                            .fontWeight(.semibold)
+
+                        Text("Read daily reflections with ratings, without switching into the todo view.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        HStack {
+                            Text(totalDays == 0
+                                 ? "No days yet"
+                                 : "Showing \(startIndex + 1)-\(endIndex) of \(totalDays)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Previous") {
+                                journalPage = max(journalPage - 1, 0)
+                            }
+                            .disabled(journalPage == 0)
+                            .buttonStyle(.bordered)
+
+                            Text("Page \(journalPage + 1) of \(journalPageCount)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
+                            Button("Next") {
+                                journalPage = min(journalPage + 1, max(0, journalPageCount - 1))
+                            }
+                            .disabled(journalPage >= journalPageCount - 1 || totalDays == 0)
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
+                if dayPlans.isEmpty {
+                    ContentUnavailableView("No journal entries yet", systemImage: "book.closed")
+                } else {
+                    ForEach(journalEntries) { plan in
+                        journalDayCard(for: plan)
+                    }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 980, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var journalPageCount: Int {
+        max(1, Int(ceil(Double(dayPlans.count) / Double(journalPageSize))))
+    }
+
+    private var journalEntries: [DayPlan] {
+        let start = journalPage * journalPageSize
+        guard start < dayPlans.count else { return [] }
+        let end = min(start + journalPageSize, dayPlans.count)
+        return Array(dayPlans[start..<end])
+    }
+
+    private func clampJournalPage() {
+        let maxPage = max(0, journalPageCount - 1)
+        journalPage = min(max(journalPage, 0), maxPage)
+    }
+
+    private func journalDayCard(for plan: DayPlan) -> some View {
+        sectionCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(formattedDayLabel(for: plan.dateKey))
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Text("Rating: \(plan.dayRating.map { "\($0)/10" } ?? "-")")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Open Day") {
+                        selectedDateKey = plan.dateKey
+                        detailMode = .day
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Text("Reflection")
+                    .font(.subheadline.weight(.semibold))
+                Text(journalReflectionText(for: plan))
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func journalReflectionText(for plan: DayPlan) -> String {
+        let text = (plan.reflection ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "No reflection recorded for this day." : text
+    }
+
     private func dayView(plan: DayPlan) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
@@ -883,7 +1012,10 @@ struct PlannerRootView: View {
                 if pendingCount > 0 {
                     HStack(spacing: 8) {
                         Button("Carry Forward") {
-                            let nextKey = store.carryPendingTodosToNextDay(from: plan)
+                            let nextKey = store.carryPendingTodosToNextDay(
+                                from: plan,
+                                ignoreWeekends: ignoreCarryForwardWeekends
+                            )
                             selectedDateKey = nextKey
                             detailMode = .day
                         }
@@ -1009,7 +1141,11 @@ struct PlannerRootView: View {
 
     private func requestCarryForward(todo: TodoItem, in plan: DayPlan) {
         if skipCarryForwardConfirm {
-            _ = store.carryTodoToNextDay(todo, from: plan)
+            _ = store.carryTodoToNextDay(
+                todo,
+                from: plan,
+                ignoreWeekends: ignoreCarryForwardWeekends
+            )
             return
         }
         carryForwardDontAskAgain = skipCarryForwardConfirm
@@ -1055,7 +1191,11 @@ struct PlannerRootView: View {
             return
         }
 
-        _ = store.carryTodoToNextDay(todo, from: plan)
+        _ = store.carryTodoToNextDay(
+            todo,
+            from: plan,
+            ignoreWeekends: ignoreCarryForwardWeekends
+        )
     }
 
     private func todoDragToken(_ todo: TodoItem) -> String {
