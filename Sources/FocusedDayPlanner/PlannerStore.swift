@@ -31,7 +31,7 @@ final class PlannerStore: ObservableObject {
         return formatter.date(from: key)
     }
 
-    func ensureDayPlan(for dateKey: String, now: Date = .now) {
+    func ensureDayPlan(for dateKey: String, now: Date = .now, allowAutoRollover: Bool = true) {
         if fetchDayPlan(for: dateKey) != nil {
             return
         }
@@ -39,7 +39,7 @@ final class PlannerStore: ObservableObject {
         let newPlan = DayPlan(dateKey: dateKey, createdAt: now, updatedAt: now)
         context.insert(newPlan)
 
-        if dateKey == todayKey(now: now), let previousPlan = mostRecentPlan(before: dateKey) {
+        if allowAutoRollover, dateKey == todayKey(now: now), let previousPlan = mostRecentPlan(before: dateKey) {
             rolloverUnfinishedTodos(from: previousPlan, to: newPlan, now: now)
         }
 
@@ -67,7 +67,7 @@ final class PlannerStore: ObservableObject {
             ignoreWeekends: ignoreWeekends
         )
         let nextKey = dateKey(for: nextDate)
-        ensureDayPlan(for: nextKey, now: now)
+        ensureDayPlan(for: nextKey, now: now, allowAutoRollover: false)
 
         guard let destination = fetchDayPlan(for: nextKey) else { return nextKey }
 
@@ -337,7 +337,7 @@ final class PlannerStore: ObservableObject {
             ignoreWeekends: ignoreWeekends
         )
         let nextKey = dateKey(for: nextDate)
-        ensureDayPlan(for: nextKey, now: now)
+        ensureDayPlan(for: nextKey, now: now, allowAutoRollover: false)
 
         guard let destination = fetchDayPlan(for: nextKey) else { return nextKey }
         for existing in destination.todos {

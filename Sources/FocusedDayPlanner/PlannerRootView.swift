@@ -119,6 +119,23 @@ struct PlannerRootView: View {
         )
     }
 
+    private var appVersionDisplay: String {
+        let info = Bundle.main.infoDictionary
+        let shortVersion = info?["CFBundleShortVersionString"] as? String
+        let buildNumber = info?["CFBundleVersion"] as? String
+
+        switch (shortVersion, buildNumber) {
+        case let (short?, build?) where !short.isEmpty && !build.isEmpty:
+            return "\(short) (\(build))"
+        case let (short?, _):
+            return short
+        case let (_, build?):
+            return build
+        default:
+            return "Development"
+        }
+    }
+
     private var decorativeImage: NSImage? {
         guard let imageURL = currentDecorativeImageURL,
               let image = NSImage(contentsOf: imageURL) else {
@@ -668,6 +685,15 @@ struct PlannerRootView: View {
 
                     Toggle("Ignore Weekends for Carry Forward", isOn: $ignoreCarryForwardWeekends)
                         .toggleStyle(.switch)
+
+                    HStack {
+                        Text("Version")
+                            .font(.title3)
+                        Spacer()
+                        Text(appVersionDisplay)
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
 
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Theme Tint")

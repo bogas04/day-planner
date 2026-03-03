@@ -10,6 +10,8 @@ A native macOS SwiftUI app for daily planning:
 - JSON import/export
 - subtle theme tint customization
 
+![FocusedDayPlanner screenshot](.github/screenshot.png)
+
 ## App Terminology (UI -> Internal)
 Use these exact names when prompting changes.
 
@@ -77,6 +79,21 @@ cd ~/Developer/FocusedDayPlanner
 This creates:
 - `~/Developer/FocusedDayPlanner/dist/FocusedDayPlanner.app`
 
+Non-interactive bundle build (for CI):
+```bash
+cd ~/Developer/FocusedDayPlanner
+./scripts/package-app.sh --no-install
+```
+
+Build a DMG after packaging:
+```bash
+cd ~/Developer/FocusedDayPlanner
+./scripts/create-dmg.sh
+```
+
+This creates:
+- `~/Developer/FocusedDayPlanner/dist/FocusedDayPlanner-<version>-<build>.dmg`
+
 Install to Applications:
 ```bash
 cp -R ~/Developer/FocusedDayPlanner/dist/FocusedDayPlanner.app /Applications/
@@ -105,6 +122,8 @@ The app requests notification permission.
 - `Sources/FocusedDayPlanner/TodoTextFormatter.swift` - todo URL/Linear formatting
 - `Sources/FocusedDayPlanner/AppIconProvider.swift` - generated app/menu icons
 - `scripts/package-app.sh` - app bundling script
+- `scripts/create-dmg.sh` - DMG packaging script
+- `.github/workflows/release-dmg.yml` - CI/CD build + release artifact upload
 
 ## Notes
 - Data is stored locally via SwiftData.
@@ -116,3 +135,7 @@ The app requests notification permission.
   - Startup uses `PersistenceController` to read schema version metadata and run migration hooks before opening the store.
   - Add future migrations in `applyMigration(toVersion:storeDirectory:)` in `Sources/FocusedDayPlanner/PersistenceController.swift`.
 - If you change app identifiers in packaging, update `CFBundleIdentifier` in `scripts/package-app.sh`.
+- App versioning:
+  - Marketing version comes from `VERSION` (or `MARKETING_VERSION` env var in CI).
+  - Build number defaults to git commit count (`git rev-list --count HEAD`) and is used as `CFBundleVersion`.
+  - On tagged CI releases (`v*`), tag value is used as marketing version and the `.dmg` is attached to the GitHub Release.

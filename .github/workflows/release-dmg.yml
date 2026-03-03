@@ -1,0 +1,60 @@
+name: Build and Release DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute build metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            echo "marketing_version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          elif [[ -f VERSION ]]; then
+            echo "marketing_version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+          else
+            echo "marketing_version=1.0.0" >> "$GITHUB_OUTPUT"
+          fi
+          echo "build_number=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build app bundle
+        env:
+          CI: "true"
+          MARKETING_VERSION: ${{ steps.meta.outputs.marketing_version }}
+          BUILD_NUMBER: ${{ steps.meta.outputs.build_number }}
+        run: ./scripts/package-app.sh --no-install
+
+      - name: Create DMG
+        env:
+          MARKETING_VERSION: ${{ steps.meta.outputs.marketing_version }}
+          BUILD_NUMBER: ${{ steps.meta.outputs.build_number }}
+        run: ./scripts/create-dmg.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FocusedDayPlanner-${{ steps.meta.outputs.marketing_version }}-${{ steps.meta.outputs.build_number }}
+          path: |
+            dist/*.app
+            dist/*.dmg
+
+      - name: Publish GitHub Release asset
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
