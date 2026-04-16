@@ -1,57 +1,77 @@
 # FocusedDayPlanner
 
-A native macOS SwiftUI app for daily planning:
-- day-based todo lists
-- day rating (1-10)
-- reflection notes
-- history, all-todos, calendar, and stats views
-- menu bar launcher
-- hourly reminder notifications (11am-5pm when pending todos exist)
-- JSON import/export
-- subtle theme tint customization
+FocusedDayPlanner is a native macOS planner built with SwiftUI and SwiftData for people who want a calm daily workspace instead of a cluttered task app.
 
 ![FocusedDayPlanner screenshot](.github/screenshot.png)
 
-## App Terminology (UI -> Internal)
-Use these exact names when prompting changes.
+## What’s New In 1.1
+- dedicated **Sound Mixer** page with mixable ambient sound-effect tiles
+- pause/resume that preserves your exact custom sound mix
+- sidebar page highlighting for planner destinations
+- menu bar launcher for quick reopen access
+- wellness-break overlays and reminder controls
+- UI zoom controls for better readability on different displays
+- refreshed settings layout and richer app polish
 
-| User-facing label/location | Internal term in code | Notes |
-|---|---|---|
-| Sidebar section **Planner** | Sidebar `Section("Planner")` in `PlannerRootView` | Navigation entry group |
-| Sidebar section **History** | Sidebar `Section("History")` in `PlannerRootView` | Recent day list (`recentPlans`) |
-| **Today** | `DetailMode.day` + `todayKey` | Opens today’s day plan |
-| **All Todos** | `DetailMode.todos`, `allTodosView` | Cross-day grouped todo view |
-| **Calendar** | `DetailMode.calendar`, `calendarGridView` | Month grid with day summaries |
-| **Stats** | `DetailMode.stats`, `statsView` | Overall rating + weekly done/day comparison |
-| **Settings** | `DetailMode.settings`, `settingsView` | Notifications, theme tint, data actions |
-| Day detail screen | `dayView(plan:)` | Header + todo section for one day |
-| Day header card | `header(for:)` | Date, rating, reflection, carry-forward |
-| Day todos card | `todoSection(for:)` | Input + reorderable per-day todo list |
-| All-todos day card | `allTodosDayCard(for:)` | A day block inside all-todos view |
+## Core Experience
+- **Today** for focused day planning
+- **All Todos** for a cross-day view of every task
+- **Calendar** for navigating daily summaries month by month
+- **Stats** for completion and rating trends
+- **Journal** for reflection history
+- **Sound Mixer** for blending rain, wind, waves, leaves, thunderstorm, and restaurant ambience
+- **Settings** for reminders, appearance, storage, and audio configuration
 
-## Data Import/Export
-- Export button: **Settings -> Export Data (JSON)**
-- Import button: **Settings -> Import Data (JSON)**
-- Import behavior: replaces all existing day/todo/link data with imported snapshot
-- Snapshot schema fields include:
-  - `schemaVersion`, `exportedAt`
-  - `days[]`: `dateKey`, `dayRating`, `reflection`, timestamps
-  - `todos[]`: title, priority/source raw values, done state, sort order, timestamps
-  - `linearLinks[]`: url, displayText, sort order, timestamps
-- Dates are encoded as ISO-8601.
+## Features
+- day-based todo planning with reorderable tasks
+- carry-forward workflow for unfinished work
+- day rating and written reflection
+- sidebar history of recent days
+- local-first data storage with JSON import/export
+- hourly todo reminders when work is still pending
+- optional wellness reminders every 10 to 180 minutes
+- dedicated sound mixer with click-to-balance and drag-to-set levels
+- sound-effect cache folder access from Settings
+- menu bar entry to reopen the planner quickly
+- adjustable UI scale with keyboard shortcuts
+- theme tint customization and decorative sidebar artwork
+
+## Sound Mixer
+The Sound Mixer is a dedicated sidebar page for building a background ambience mix while you work.
+
+- click a sound tile to activate it and rebalance all active tiles evenly
+- drag across a tile to set that tile anywhere from `0%` to `100%`
+- pause and resume without losing your current mix
+- use the toolbar mini-player for quick playback and master volume control
+- built-in effects currently include:
+  - walking on leaves
+  - whistling wind
+  - thunderstorm
+  - leaves rustling
+  - calming rain
+  - soothing ocean waves
+  - busy restaurant ambience
+
+## Notifications
+The app requests notification permission for planner reminders.
+
+- pending todos trigger hourly reminders from `11:00` through `17:00`
+- empty days can prompt you to add work for the day
+- completed days do not trigger hourly todo reminders
+- wellness reminders can repeat on your chosen interval
+- test and permission-check actions are available in Settings
 
 ## Requirements
 - macOS 14+
-- Xcode / Swift toolchain with `swift` CLI available
+- Xcode or Swift toolchain with the `swift` CLI available
 
-## Run (Debug)
+## Run
 ```bash
 cd ~/Developer/FocusedDayPlanner
 swift run
 ```
 
 ## Build
-Debug build:
 ```bash
 cd ~/Developer/FocusedDayPlanner
 swift build
@@ -69,8 +89,7 @@ cd ~/Developer/FocusedDayPlanner
 swift test
 ```
 
-## Package as macOS App
-Use the packaging script:
+## Package As A macOS App
 ```bash
 cd ~/Developer/FocusedDayPlanner
 ./scripts/package-app.sh
@@ -79,13 +98,13 @@ cd ~/Developer/FocusedDayPlanner
 This creates:
 - `~/Developer/FocusedDayPlanner/dist/FocusedDayPlanner.app`
 
-Non-interactive bundle build (for CI):
+Non-interactive build:
 ```bash
 cd ~/Developer/FocusedDayPlanner
 ./scripts/package-app.sh --no-install
 ```
 
-Build a DMG after packaging:
+Create a DMG:
 ```bash
 cd ~/Developer/FocusedDayPlanner
 ./scripts/create-dmg.sh
@@ -94,48 +113,31 @@ cd ~/Developer/FocusedDayPlanner
 This creates:
 - `~/Developer/FocusedDayPlanner/dist/FocusedDayPlanner-<version>-<build>.dmg`
 
-Install to Applications:
-```bash
-cp -R ~/Developer/FocusedDayPlanner/dist/FocusedDayPlanner.app /Applications/
-```
-
-## Add to Login Items
-1. Open **System Settings**
-2. Go to **General -> Login Items**
-3. Under **Open at Login**, click `+`
-4. Select `/Applications/FocusedDayPlanner.app`
-
-## Notifications Behavior
-The app requests notification permission.
-
-- If today has pending todos: notifies hourly at 11:00, 12:00, ..., 17:00
-  - Message: `You have x todos left, let's do it!`
-- If today has zero todos total: notifies at 11:00 only
-  - Message: `What would you like to work on today?`
-- If todos exist but all are done: no hourly reminders
+## Data And Storage
+- planner data is stored locally via SwiftData
+- default store location:
+  - `~/Library/Application Support/FocusedDayPlanner/FocusedDayPlanner.store`
+- store metadata file:
+  - `~/Library/Application Support/FocusedDayPlanner/StoreMetadata.json`
+- sound-effect cache location:
+  - `~/Library/Application Support/FocusedDayPlanner/AudioLibrary/Curated/`
 
 ## Project Structure
-- `Sources/FocusedDayPlanner/FocusedDayPlannerApp.swift` - app entry, menu bar, app setup
-- `Sources/FocusedDayPlanner/PlannerRootView.swift` - main UI and navigation
-- `Sources/FocusedDayPlanner/PlannerStore.swift` - persistence operations and business logic
-- `Sources/FocusedDayPlanner/DailyReminderScheduler.swift` - notification scheduling
-- `Sources/FocusedDayPlanner/TodoTextFormatter.swift` - todo URL/Linear formatting
-- `Sources/FocusedDayPlanner/AppIconProvider.swift` - generated app/menu icons
-- `scripts/package-app.sh` - app bundling script
-- `scripts/create-dmg.sh` - DMG packaging script
-- `.github/workflows/release-dmg.yml` - CI/CD build + release artifact upload
+- `Sources/FocusedDayPlanner/FocusedDayPlannerApp.swift` - app entry, window setup, menu bar integration
+- `Sources/FocusedDayPlanner/PlannerRootView.swift` - main navigation and primary UI
+- `Sources/FocusedDayPlanner/PlannerStore.swift` - persistence operations and planner business logic
+- `Sources/FocusedDayPlanner/BackgroundAudioController.swift` - sound mixer state, caching, and playback
+- `Sources/FocusedDayPlanner/DailyReminderScheduler.swift` - reminder scheduling
+- `Sources/FocusedDayPlanner/PersistenceController.swift` - store location and migrations
+- `scripts/package-app.sh` - app bundling
+- `scripts/create-dmg.sh` - DMG packaging
 
-## Notes
-- Data is stored locally via SwiftData.
-- Persistent store path:
-  - `~/Library/Application Support/FocusedDayPlanner/FocusedDayPlanner.store`
-- Store metadata/version file:
-  - `~/Library/Application Support/FocusedDayPlanner/StoreMetadata.json`
-- Schema/version migrations:
-  - Startup uses `PersistenceController` to read schema version metadata and run migration hooks before opening the store.
-  - Add future migrations in `applyMigration(toVersion:storeDirectory:)` in `Sources/FocusedDayPlanner/PersistenceController.swift`.
-- If you change app identifiers in packaging, update `CFBundleIdentifier` in `scripts/package-app.sh`.
-- App versioning:
-  - Marketing version comes from `VERSION` (or `MARKETING_VERSION` env var in CI).
-  - Build number defaults to git commit count (`git rev-list --count HEAD`) and is used as `CFBundleVersion`.
-  - On tagged CI releases (`v*`), tag value is used as marketing version and the `.dmg` is attached to the GitHub Release.
+## Versioning And Releases
+- marketing version comes from `VERSION`
+- build number defaults to `git rev-list --count HEAD`
+- tagged releases using `v*` can be used by CI packaging workflows
+
+## Repository Notes
+- this app is local-first by design
+- import replaces existing planner content with the imported snapshot
+- future schema migrations should be added in `PersistenceController.applyMigration(toVersion:storeDirectory:)`

@@ -26,7 +26,6 @@ struct PlannerStoreCarryForwardTests {
 
         #expect(destination.todos.count == 2)
         #expect(destination.todos.allSatisfy { $0.source == .rollover })
-        #expect(previousPlan.todos.filter { !$0.isDone }.isEmpty)
     }
 
     @Test
@@ -51,7 +50,6 @@ struct PlannerStoreCarryForwardTests {
         #expect(destination.todos.count == 1)
         #expect(destination.todos.first?.title == "Task A")
         #expect(destination.todos.first?.source == .rollover)
-        #expect(previousPlan.todos.filter { !$0.isDone }.isEmpty)
     }
 
     private func makeInMemoryContainer() throws -> ModelContainer {

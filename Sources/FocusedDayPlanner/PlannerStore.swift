@@ -5,10 +5,21 @@ import SwiftData
 final class PlannerStore: ObservableObject {
     private let context: ModelContext
     private let calendar: Calendar
+    private var pendingSaveTask: Task<Void, Never>?
+    private var pendingNotificationRefreshTask: Task<Void, Never>?
+    private var lastScheduledNotificationState: NotificationState?
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 
     init(context: ModelContext, calendar: Calendar = .current) {
         self.context = context
         self.calendar = calendar
+        Self.dateFormatter.calendar = calendar
     }
 
     func todayKey(now: Date = .now) -> String {
@@ -24,11 +35,8 @@ final class PlannerStore: ObservableObject {
     }
 
     func date(from key: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.date(from: key)
+        Self.dateFormatter.calendar = calendar
+        return Self.dateFormatter.date(from: key)
     }
 
     func ensureDayPlan(for dateKey: String, now: Date = .now, allowAutoRollover: Bool = true) {
@@ -43,7 +51,7 @@ final class PlannerStore: ObservableObject {
             rolloverUnfinishedTodos(from: previousPlan, to: newPlan, now: now)
         }
 
-        save()
+        save(refreshNotifications: true)
     }
 
     func createNextDay(after dateKey: String?) -> String {
@@ -94,7 +102,7 @@ final class PlannerStore: ObservableObject {
         normalizeTodoSortOrder(for: dayPlan, now: now)
         destination.updatedAt = now
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: true)
         return nextKey
     }
 
@@ -169,17 +177,15 @@ final class PlannerStore: ObservableObject {
         context.insert(todo)
         dayPlan.todos.append(todo)
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: true)
     }
 
-    func refreshTodayNotifications(now: Date = .now) {
+    func refreshTodayNotifications(now: Date = .now, force: Bool = false) {
         let today = todayKey(now: now)
         let todayPlan = fetchDayPlan(for: today)
         let total = todayPlan?.todos.count ?? 0
         let pending = todayPlan?.todos.filter { !$0.isDone }.count ?? 0
-        Task { @MainActor in
-            DailyReminderScheduler.shared.refresh(totalTodos: total, pendingTodos: pending, now: now)
-        }
+        scheduleNotificationRefresh(totalTodos: total, pendingTodos: pending, now: now, force: force)
     }
 
     func deleteTodo(_ todo: TodoItem, from dayPlan: DayPlan, now: Date = .now) {
@@ -187,7 +193,7 @@ final class PlannerStore: ObservableObject {
         context.delete(todo)
         normalizeTodoSortOrder(for: dayPlan, now: now)
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: true)
     }
 
     func moveTodos(indices: IndexSet, newOffset: Int, for dayPlan: DayPlan, now: Date = .now) {
@@ -198,7 +204,7 @@ final class PlannerStore: ObservableObject {
             todo.updatedAt = now
         }
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: false)
     }
 
     func moveTodo(_ todo: TodoItem, in dayPlan: DayPlan, delta: Int, now: Date = .now) {
@@ -217,7 +223,7 @@ final class PlannerStore: ObservableObject {
             item.updatedAt = now
         }
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: false)
     }
 
     func moveTodo(_ todo: TodoItem, in dayPlan: DayPlan, to targetIndex: Int, now: Date = .now) {
@@ -236,7 +242,7 @@ final class PlannerStore: ObservableObject {
             item.updatedAt = now
         }
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: false)
     }
 
     func moveTodo(_ todo: TodoItem, from sourcePlan: DayPlan, to destinationPlan: DayPlan, now: Date = .now) {
@@ -250,7 +256,8 @@ final class PlannerStore: ObservableObject {
         normalizeTodoSortOrder(for: sourcePlan, now: now)
         destinationPlan.updatedAt = now
         sourcePlan.updatedAt = now
-        save()
+        save(refreshNotifications: true)
+        sourcePlan.todos.removeAll { $0.persistentModelID == todo.persistentModelID }
     }
 
     func sortedTodos(for dayPlan: DayPlan) -> [TodoItem] {
@@ -263,14 +270,14 @@ final class PlannerStore: ObservableObject {
         }
         dayPlan.dayRating = rating
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: false)
     }
 
     func updateDayReflection(_ reflection: String, for dayPlan: DayPlan, now: Date = .now) {
         let trimmed = reflection.trimmingCharacters(in: .whitespacesAndNewlines)
         dayPlan.reflection = trimmed.isEmpty ? nil : reflection
         dayPlan.updatedAt = now
-        save()
+        scheduleSave(refreshNotifications: false)
     }
 
     @discardableResult
@@ -282,7 +289,7 @@ final class PlannerStore: ObservableObject {
         }
         dayPlan.dateKey = trimmed
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: false)
         return true
     }
 
@@ -313,14 +320,14 @@ final class PlannerStore: ObservableObject {
         }
 
         context.delete(dayPlan)
-        save()
+        save(refreshNotifications: true)
         return destination?.dateKey
     }
 
     func touchTodo(_ todo: TodoItem, now: Date = .now) {
         todo.updatedAt = now
         todo.dayPlan?.updatedAt = now
-        save()
+        scheduleSave(refreshNotifications: false)
     }
 
     @discardableResult
@@ -354,7 +361,7 @@ final class PlannerStore: ObservableObject {
         normalizeTodoSortOrder(for: dayPlan, now: now)
         destination.updatedAt = now
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: true)
         return nextKey
     }
 
@@ -367,7 +374,7 @@ final class PlannerStore: ObservableObject {
         (try? context.fetch(linkDescriptor))?.forEach { context.delete($0) }
         (try? context.fetch(dayDescriptor))?.forEach { context.delete($0) }
 
-        save()
+        save(refreshNotifications: true)
     }
 
     func exportSnapshotJSON() throws -> Data {
@@ -497,7 +504,7 @@ final class PlannerStore: ObservableObject {
         context.insert(link)
         dayPlan.linearLinks.append(link)
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: false)
         return true
     }
 
@@ -506,7 +513,7 @@ final class PlannerStore: ObservableObject {
         context.delete(link)
         normalizeLinkSortOrder(for: dayPlan, now: now)
         dayPlan.updatedAt = now
-        save()
+        save(refreshNotifications: false)
     }
 
     func sortedLinearLinks(for dayPlan: DayPlan) -> [LinearLink] {
@@ -516,7 +523,7 @@ final class PlannerStore: ObservableObject {
     func touchLinearLink(_ link: LinearLink, in dayPlan: DayPlan, now: Date = .now) {
         link.updatedAt = now
         dayPlan.updatedAt = now
-        save()
+        scheduleSave(refreshNotifications: false)
     }
 
     private func normalizeTodoSortOrder(for dayPlan: DayPlan, now: Date) {
@@ -533,14 +540,78 @@ final class PlannerStore: ObservableObject {
         }
     }
 
-    func save() {
+    func save(refreshNotifications: Bool) {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
         do {
             try context.save()
-            refreshTodayNotifications()
+            if refreshNotifications {
+                refreshTodayNotifications()
+            }
         } catch {
+            AppLogger.persistence.error("Failed to save planner data: \(error.localizedDescription, privacy: .public)")
             assertionFailure("Failed to save planner data: \(error)")
         }
     }
+
+    func scheduleSave(refreshNotifications: Bool, delayNanoseconds: UInt64 = 300_000_000) {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+            } catch {
+                return
+            }
+
+            await MainActor.run {
+                self?.save(refreshNotifications: refreshNotifications)
+            }
+        }
+    }
+
+    private func scheduleNotificationRefresh(
+        totalTodos: Int,
+        pendingTodos: Int,
+        now: Date,
+        force: Bool = false
+    ) {
+        let state = NotificationState(
+            totalTodos: totalTodos,
+            pendingTodos: pendingTodos,
+            notificationsEnabled: AppSettings.notificationsEnabled,
+            wellnessBreakEnabled: AppSettings.wellnessBreakRemindersEnabled,
+            wellnessBreakIntervalMinutes: AppSettings.wellnessBreakIntervalMinutes
+        )
+
+        if !force, state == lastScheduledNotificationState {
+            return
+        }
+
+        lastScheduledNotificationState = state
+        pendingNotificationRefreshTask?.cancel()
+        pendingNotificationRefreshTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else { return }
+            DailyReminderScheduler.shared.refresh(
+                totalTodos: state.totalTodos,
+                pendingTodos: state.pendingTodos,
+                now: now
+            )
+        }
+    }
+}
+
+private struct NotificationState: Equatable {
+    let totalTodos: Int
+    let pendingTodos: Int
+    let notificationsEnabled: Bool
+    let wellnessBreakEnabled: Bool
+    let wellnessBreakIntervalMinutes: Int
 }
 
 private struct PlannerSnapshotDTO: Codable {

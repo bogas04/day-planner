@@ -9,24 +9,33 @@ private enum DetailMode {
     case calendar
     case stats
     case journal
+    case soundMixer
     case settings
 }
 
 struct PlannerRootView: View {
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var uiScaleController: UIScaleController
+    @EnvironmentObject private var backgroundAudioController: BackgroundAudioController
     @Query(sort: \DayPlan.dateKey, order: .reverse) private var dayPlans: [DayPlan]
     @AppStorage(AppSettings.notificationsEnabledKey) private var notificationsEnabled = true
+    @AppStorage(AppSettings.wellnessBreakRemindersEnabledKey) private var wellnessBreakRemindersEnabled = false
+    @AppStorage(AppSettings.wellnessBreakIntervalMinutesKey)
+    private var wellnessBreakIntervalMinutes = AppSettings.defaultWellnessBreakIntervalMinutes
     @AppStorage(AppSettings.skipCarryForwardConfirmKey) private var skipCarryForwardConfirm = false
     @AppStorage(AppSettings.ignoreCarryForwardWeekendsKey) private var ignoreCarryForwardWeekends = true
     @AppStorage(AppSettings.themeTintRedKey) private var themeTintRed = 0.86
     @AppStorage(AppSettings.themeTintGreenKey) private var themeTintGreen = 0.76
     @AppStorage(AppSettings.themeTintBlueKey) private var themeTintBlue = 0.60
     @AppStorage(AppSettings.themeTintOpacityKey) private var themeTintOpacity = 0.10
+    @AppStorage(AppSettings.backgroundAudioEnabledKey) private var backgroundAudioEnabled = true
+    @AppStorage(AppSettings.backgroundAudioAutoResumeKey) private var backgroundAudioAutoResume = false
 
     @State private var selectedDateKey: String?
     @State private var detailMode: DetailMode = .day
     @State private var todoInput = ""
     @State private var editingLinkedTodos: Set<PersistentIdentifier> = []
+    @State private var plannerStore: PlannerStore?
 
     @State private var showingDateEditor = false
     @State private var dateEditorValue: Date = .now
@@ -42,9 +51,15 @@ struct PlannerRootView: View {
     @State private var pendingCarryTodoID: PersistentIdentifier?
     @State private var pendingCarryPlanDateKey: String?
     @State private var dataTransferMessage: String?
+    @State private var notificationDebugMessage = "Permission state will appear here after a check."
+    @State private var isCheckingNotificationStatus = false
     @State private var draggedTodoToken: String?
     @State private var decorativeImageCycleOffset = 0
     @State private var decorativeImageBloomColor = Color.accentColor.opacity(0.35)
+    @State private var decorativeImageCandidates: [URL] = []
+    @State private var currentDecorativeImage: NSImage?
+    @State private var currentDecorativeImagePath: String?
+    @State private var decorativeImageColorCache: [String: Color] = [:]
     @State private var imagePanelFraction: CGFloat = 0.33
     @State private var imagePanelDragStartFraction: CGFloat?
     @State private var reflectionPlaceholderIndex = 0
@@ -54,10 +69,28 @@ struct PlannerRootView: View {
 
     @State private var calendarMonth: Date = Date()
     @State private var journalPage = 0
+    @State private var weeklyRatingsOffset = 0
+    @State private var journalDateRange: DateInterval?
 
     private let historyLimit = 10
     private let journalPageSize = 10
     private let calendar = Calendar.current
+    private static let monthTitleFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "LLLL yyyy"
+        return formatter
+    }()
+    private static let fullDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .full
+        formatter.timeStyle = .none
+        return formatter
+    }()
+    private static let shortDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
     private let reflectionPrompts = [
         "What felt meaningful today, even in a small way?",
         "What are you proud of from today?",
@@ -72,7 +105,17 @@ struct PlannerRootView: View {
     ]
 
     private var store: PlannerStore {
-        PlannerStore(context: modelContext)
+        if let plannerStore {
+            return plannerStore
+        }
+
+        let store = PlannerStore(context: modelContext)
+        DispatchQueue.main.async {
+            if self.plannerStore == nil {
+                self.plannerStore = store
+            }
+        }
+        return store
     }
 
     private var todayKey: String {
@@ -98,6 +141,8 @@ struct PlannerRootView: View {
             return "Stats"
         case .journal:
             return "Journal"
+        case .soundMixer:
+            return "Sound Mixer"
         case .settings:
             return "Settings"
         case .day:
@@ -136,16 +181,16 @@ struct PlannerRootView: View {
         }
     }
 
+    private func scaledFont(_ baseSize: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: uiScaleController.scaledMetric(baseSize), weight: weight)
+    }
+
     private var decorativeImage: NSImage? {
-        guard let imageURL = currentDecorativeImageURL,
-              let image = NSImage(contentsOf: imageURL) else {
-            return nil
-        }
-        return image
+        currentDecorativeImage
     }
 
     private var currentDecorativeImageURL: URL? {
-        let candidates = decorativeImageCandidateURLs()
+        let candidates = decorativeImageCandidates
         guard !candidates.isEmpty else { return nil }
 
         let selectedKey = selectedDateKey ?? todayKey
@@ -155,14 +200,31 @@ struct PlannerRootView: View {
         return candidates[resolvedIndex]
     }
 
+    private var sidebarImagesDirectoryURL: URL? {
+        PersistenceController.decorativeImagesDirectoryURL()
+    }
+
+    private var sidebarImagesDirectoryLabel: String {
+        sidebarImagesDirectoryURL?.lastPathComponent ?? "Sidebar Images"
+    }
+
+    private var soundMixerColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(minimum: 160), spacing: 14), count: 2)
+    }
+
     var body: some View {
         NavigationSplitView {
             sidebar
         } detail: {
             detail
         }
+        .dynamicTypeSize(uiScaleController.dynamicTypeSize)
+        .controlSize(uiScaleController.controlSize)
         .navigationTitle(currentTitle)
         .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                backgroundAudioMiniBar
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     selectedDateKey = store.createNextDay(after: selectedDateKey)
@@ -292,26 +354,46 @@ struct PlannerRootView: View {
                     calendarMonth = monthStart(for: date)
                 }
             }
-            refreshDecorativeImageBloomColor()
+            reloadDecorativeImageCandidatesIfNeeded()
+            refreshDecorativeImagePresentation()
             store.refreshTodayNotifications()
+            if !backgroundAudioEnabled {
+                backgroundAudioController.pause()
+            } else if backgroundAudioAutoResume || backgroundAudioController.activeSoundCount > 0 {
+                backgroundAudioController.loadLibraryIfNeeded()
+            } else {
+                backgroundAudioController.loadLibraryIfNeeded()
+            }
         }
         .onChange(of: selectedDateKey) { _, _ in
             decorativeImageCycleOffset = 0
             reflectionPlaceholderIndex = (reflectionPlaceholderIndex + 1) % reflectionPrompts.count
-            refreshDecorativeImageBloomColor()
+            refreshDecorativeImagePresentation()
         }
         .onChange(of: decorativeImageCycleOffset) { _, _ in
-            refreshDecorativeImageBloomColor()
+            refreshDecorativeImagePresentation()
         }
         .onChange(of: dayPlans.count) { _, _ in
             clampJournalPage()
+            clampWeeklyRatingsOffset()
         }
     }
 
-    private func decorativeImageCandidateURLs() -> [URL] {
+    private func loadDecorativeImageCandidateURLs() -> [URL] {
         let fileManager = FileManager.default
 
         var candidates: [URL] = []
+        if let customFolderURL = sidebarImagesDirectoryURL,
+           let enumerator = fileManager.enumerator(
+                at: customFolderURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+           ) {
+            for case let fileURL as URL in enumerator where isDecorativeImageFile(fileURL.lastPathComponent) {
+                candidates.append(fileURL)
+            }
+        }
+
         if let resourceURL = Bundle.main.resourceURL,
            let resourceFiles = try? fileManager.contentsOfDirectory(
                 at: resourceURL,
@@ -336,6 +418,15 @@ struct PlannerRootView: View {
         var seenPaths = Set<String>()
         let unique = candidates.filter { seenPaths.insert($0.path).inserted }
         return unique.sorted(by: decorativeImageSort)
+    }
+
+    private func reloadDecorativeImageCandidatesIfNeeded(force: Bool = false) {
+        if force {
+            PersistenceController.prepareDecorativeImagesDirectoryIfNeeded()
+        }
+
+        guard force || decorativeImageCandidates.isEmpty else { return }
+        decorativeImageCandidates = loadDecorativeImageCandidateURLs()
     }
 
     private func isDecorativeImageFile(_ fileName: String) -> Bool {
@@ -375,18 +466,37 @@ struct PlannerRootView: View {
         return Int(rawNumber)
     }
 
-    private func refreshDecorativeImageBloomColor() {
-        guard let image = decorativeImage, let dominant = dominantColor(for: image) else {
+    private func refreshDecorativeImagePresentation() {
+        guard let imageURL = currentDecorativeImageURL else {
+            currentDecorativeImage = nil
+            currentDecorativeImagePath = nil
             decorativeImageBloomColor = Color.accentColor.opacity(0.35)
             return
         }
 
-        decorativeImageBloomColor = Color(
+        if currentDecorativeImagePath != imageURL.path {
+            currentDecorativeImage = NSImage(contentsOf: imageURL)
+            currentDecorativeImagePath = imageURL.path
+        }
+
+        if let cachedColor = decorativeImageColorCache[imageURL.path] {
+            decorativeImageBloomColor = cachedColor
+            return
+        }
+
+        guard let image = currentDecorativeImage, let dominant = dominantColor(for: image) else {
+            decorativeImageBloomColor = Color.accentColor.opacity(0.35)
+            return
+        }
+
+        let color = Color(
             red: dominant.red,
             green: dominant.green,
             blue: dominant.blue,
             opacity: 0.45
         )
+        decorativeImageColorCache[imageURL.path] = color
+        decorativeImageBloomColor = color
     }
 
     private func dominantColor(for image: NSImage) -> (red: Double, green: Double, blue: Double)? {
@@ -454,24 +564,30 @@ struct PlannerRootView: View {
 
             VStack(spacing: 0) {
                 List(selection: $selectedDateKey) {
-                    Section("Planner") {
+                    Section {
                         Button {
                             detailMode = .day
                             selectedDateKey = todayKey
                             store.ensureDayPlan(for: todayKey)
                         } label: {
-                            Label("Today", systemImage: "calendar")
-                                .font(.title3)
+                            sidebarNavigationRow(
+                                title: "Today",
+                                systemImage: "calendar",
+                                isSelected: detailMode == .day && selectedDateKey == todayKey
+                            )
                         }
                         .buttonStyle(.plain)
 
-                    Button {
-                        detailMode = .todos
-                    } label: {
-                        Label("All Todos", systemImage: "checklist")
-                            .font(.title3)
-                    }
-                    .buttonStyle(.plain)
+                        Button {
+                            detailMode = .todos
+                        } label: {
+                            sidebarNavigationRow(
+                                title: "All Todos",
+                                systemImage: "checklist",
+                                isSelected: detailMode == .todos
+                            )
+                        }
+                        .buttonStyle(.plain)
 
                         Button {
                             detailMode = .calendar
@@ -482,16 +598,22 @@ struct PlannerRootView: View {
                                 calendarMonth = monthStart(for: .now)
                             }
                         } label: {
-                            Label("Calendar", systemImage: "calendar.day.timeline.leading")
-                                .font(.title3)
+                            sidebarNavigationRow(
+                                title: "Calendar",
+                                systemImage: "calendar.day.timeline.leading",
+                                isSelected: detailMode == .calendar
+                            )
                         }
                         .buttonStyle(.plain)
 
                         Button {
                             detailMode = .stats
                         } label: {
-                            Label("Stats", systemImage: "chart.bar")
-                                .font(.title3)
+                            sidebarNavigationRow(
+                                title: "Stats",
+                                systemImage: "chart.bar",
+                                isSelected: detailMode == .stats
+                            )
                         }
                         .buttonStyle(.plain)
 
@@ -499,21 +621,41 @@ struct PlannerRootView: View {
                             detailMode = .journal
                             clampJournalPage()
                         } label: {
-                            Label("Journal", systemImage: "book.closed")
-                                .font(.title3)
+                            sidebarNavigationRow(
+                                title: "Journal",
+                                systemImage: "book.closed",
+                                isSelected: detailMode == .journal
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            detailMode = .soundMixer
+                        } label: {
+                            sidebarNavigationRow(
+                                title: "Sound Mixer",
+                                systemImage: "speaker.wave.3",
+                                isSelected: detailMode == .soundMixer
+                            )
                         }
                         .buttonStyle(.plain)
 
                         Button {
                             detailMode = .settings
                         } label: {
-                            Label("Settings", systemImage: "gearshape")
-                                .font(.title3)
+                            sidebarNavigationRow(
+                                title: "Settings",
+                                systemImage: "gearshape",
+                                isSelected: detailMode == .settings
+                            )
                         }
                         .buttonStyle(.plain)
+                    } header: {
+                        Text("Planner")
+                            .font(scaledFont(13, weight: .semibold))
                     }
 
-                    Section("History") {
+                    Section {
                         ForEach(recentPlans) { plan in
                             Button {
                                 detailMode = .day
@@ -546,14 +688,18 @@ struct PlannerRootView: View {
                                 }
                             }
                         }
+                    } header: {
+                        Text("History")
+                            .font(scaledFont(13, weight: .semibold))
                     }
                 }
                 .listStyle(.sidebar)
+                .environment(\.defaultMinListRowHeight, uiScaleController.scaledMetric(34))
 
                 if let decorativeImage {
                     Rectangle()
                         .fill(Color.clear)
-                        .frame(height: separatorHeight)
+                        .frame(height: uiScaleController.scaledMetric(separatorHeight))
                         .overlay(alignment: .center) {
                             Divider()
                                 .overlay(Color.primary.opacity(0.22))
@@ -561,7 +707,10 @@ struct PlannerRootView: View {
                         .overlay(alignment: .center) {
                             Capsule()
                                 .fill(Color.secondary.opacity(0.35))
-                                .frame(width: 44, height: 4)
+                                .frame(
+                                    width: uiScaleController.scaledMetric(44),
+                                    height: uiScaleController.scaledMetric(4)
+                                )
                         }
                         .contentShape(Rectangle())
                         .gesture(
@@ -586,17 +735,20 @@ struct PlannerRootView: View {
                         }
 
                     Button {
-                        let count = decorativeImageCandidateURLs().count
+                        let count = decorativeImageCandidates.count
                         guard count > 1 else { return }
                         decorativeImageCycleOffset = (decorativeImageCycleOffset + 1) % count
                     } label: {
                         ZStack {
                             Circle()
                                 .fill(decorativeImageBloomColor)
-                                .frame(width: 176, height: 176)
-                                .blur(radius: 28)
+                                .frame(
+                                    width: uiScaleController.scaledMetric(176),
+                                    height: uiScaleController.scaledMetric(176)
+                                )
+                                .blur(radius: uiScaleController.scaledMetric(28))
                                 .opacity(0.22)
-                                .offset(y: 10)
+                                .offset(y: uiScaleController.scaledMetric(10))
                                 .allowsHitTesting(false)
 
                             Image(nsImage: decorativeImage)
@@ -611,8 +763,8 @@ struct PlannerRootView: View {
                     .buttonStyle(.plain)
                     .frame(maxWidth: .infinity)
                     .frame(height: imageHeight)
-                    .padding(.horizontal, 8)
-                    .padding(.bottom, 10)
+                    .padding(.horizontal, uiScaleController.scaledMetric(8))
+                    .padding(.bottom, uiScaleController.scaledMetric(10))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -623,18 +775,31 @@ struct PlannerRootView: View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(shortDayLabel(for: plan.dateKey))
-                    .font(.headline)
+                    .font(scaledFont(17, weight: .semibold))
                 Text(summaryText(for: plan))
-                    .font(.subheadline)
+                    .font(scaledFont(14))
                     .foregroundStyle(.secondary)
             }
             Spacer()
             Text(plan.dayRating.map { "\($0)/10" } ?? "-")
-                .font(.subheadline)
+                .font(scaledFont(14))
                 .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 7)
-        .padding(.horizontal, 6)
+        .padding(.vertical, uiScaleController.scaledMetric(7))
+        .padding(.horizontal, uiScaleController.scaledMetric(6))
+    }
+
+    private func sidebarNavigationRow(title: String, systemImage: String, isSelected: Bool) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(scaledFont(16))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, uiScaleController.scaledMetric(7))
+            .padding(.horizontal, uiScaleController.scaledMetric(6))
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
+            )
     }
 
     @ViewBuilder
@@ -654,6 +819,8 @@ struct PlannerRootView: View {
             statsView
         case .journal:
             journalView
+        case .soundMixer:
+            soundMixerView
         case .settings:
             settingsView
         }
@@ -661,108 +828,485 @@ struct PlannerRootView: View {
 
     private var settingsView: some View {
         ScrollView {
-            sectionCard {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Settings")
-                        .font(.largeTitle)
-                        .fontWeight(.semibold)
-
-                    Toggle(isOn: Binding(
-                        get: { notificationsEnabled },
-                        set: { newValue in
-                            notificationsEnabled = newValue
-                            if newValue {
-                                store.refreshTodayNotifications()
-                            } else {
-                                DailyReminderScheduler.shared.clearPendingNotifications()
-                            }
-                        }
-                    )) {
-                        Text("Enable Notifications")
-                            .font(.title3)
-                    }
-                    .toggleStyle(.switch)
-
-                    Toggle("Ignore Weekends for Carry Forward", isOn: $ignoreCarryForwardWeekends)
-                        .toggleStyle(.switch)
-
-                    HStack {
-                        Text("Version")
-                            .font(.title3)
-                        Spacer()
-                        Text(appVersionDisplay)
-                            .font(.title3.weight(.semibold))
+            VStack(alignment: .leading, spacing: 22) {
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Settings")
+                            .font(.system(size: 30, weight: .semibold, design: .rounded))
+                        Text("A calmer, better-aligned space for planner preferences.")
+                            .font(.system(size: 15, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
+                }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Theme Tint")
-                            .font(.title3)
-                        ColorPicker(
-                            "Shade Color",
-                            selection: Binding(
-                                get: { themeTintColor },
-                                set: { newValue in
-                                    guard let color = NSColor(newValue).usingColorSpace(.sRGB) else { return }
-                                    var red: CGFloat = 0
-                                    var green: CGFloat = 0
-                                    var blue: CGFloat = 0
-                                    var alpha: CGFloat = 0
-                                    color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-                                    themeTintRed = Double(red)
-                                    themeTintGreen = Double(green)
-                                    themeTintBlue = Double(blue)
-                                    themeTintOpacity = Double(alpha)
-                                }
-                            ),
-                            supportsOpacity: true
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "General",
+                            description: "Carry-forward behavior and app defaults."
                         )
-                        .labelsHidden()
 
-                        HStack(spacing: 10) {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(themeTintColor)
-                                .frame(width: 42, height: 24)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+                        settingsDivider()
+
+                        settingsToggleRow(
+                            title: "Ignore Weekends",
+                            description: "Carry unfinished tasks to the next workday instead of Saturday or Sunday.",
+                            isOn: $ignoreCarryForwardWeekends
+                        )
+
+                        settingsDivider()
+
+                        settingsToggleRow(
+                            title: "Skip Confirmation",
+                            description: "Move a task forward immediately without showing the carry-forward confirmation sheet.",
+                            isOn: $skipCarryForwardConfirm
+                        )
+
+                        settingsDivider()
+
+                        settingsValueRow(
+                            title: "Version",
+                            description: "Current app version and build number.",
+                            value: appVersionDisplay
+                        )
+                    }
+                }
+
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "Notifications",
+                            description: "Todo reminders and wellness-break nudges."
+                        )
+
+                        settingsDivider()
+
+                        settingsToggleRow(
+                            title: "Todo Notifications",
+                            description: "Hourly reminders when there are unfinished tasks.",
+                            isOn: Binding(
+                                get: { notificationsEnabled },
+                                set: { newValue in
+                                    notificationsEnabled = newValue
+                                    if newValue {
+                                        store.refreshTodayNotifications()
+                                    } else {
+                                        DailyReminderScheduler.shared.clearPendingNotifications()
+                                    }
+                                }
+                            )
+                        )
+
+                        settingsDivider()
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            settingsToggleRow(
+                                title: "Wellness Break",
+                                description: "Repeat reminders to stand up, stretch, exercise, or rest your eyes.",
+                                isOn: Binding(
+                                    get: { wellnessBreakRemindersEnabled },
+                                    set: { newValue in
+                                        wellnessBreakRemindersEnabled = newValue
+                                        if notificationsEnabled {
+                                            store.refreshTodayNotifications()
+                                        }
+                                    }
                                 )
-                            Text("Subtle tint for translucent cards")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                            )
+                            .disabled(!notificationsEnabled)
+
+                            settingsControlRow(
+                                title: "Break Interval",
+                                description: "Choose how often the wellness reminder should appear."
+                            ) {
+                                Stepper(
+                                    value: Binding(
+                                        get: {
+                                            AppSettings.normalizeWellnessBreakIntervalMinutes(wellnessBreakIntervalMinutes)
+                                        },
+                                        set: { newValue in
+                                            wellnessBreakIntervalMinutes = AppSettings.normalizeWellnessBreakIntervalMinutes(newValue)
+                                            if notificationsEnabled && wellnessBreakRemindersEnabled {
+                                                store.refreshTodayNotifications()
+                                            }
+                                        }
+                                    ),
+                                    in: AppSettings.minimumWellnessBreakIntervalMinutes...AppSettings.maximumWellnessBreakIntervalMinutes,
+                                    step: AppSettings.wellnessBreakIntervalStepMinutes
+                                ) {
+                                    Text("\(AppSettings.normalizeWellnessBreakIntervalMinutes(wellnessBreakIntervalMinutes)) min")
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .monospacedDigit()
+                                        .frame(minWidth: 88, alignment: .trailing)
+                                }
+                            }
+                            .disabled(!notificationsEnabled || !wellnessBreakRemindersEnabled)
+                        }
+                        .padding(.top, 18)
+                        .padding(.bottom, 18)
+                        .padding(.horizontal, 18)
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Test Delivery",
+                            description: isCheckingNotificationStatus
+                                ? "Checking current notification state..."
+                                : "Test a reminder and inspect the macOS permission state."
+                        ) {
+                            HStack(spacing: 10) {
+                                Button("Remind Now") {
+                                    isCheckingNotificationStatus = true
+                                    notificationDebugMessage = "Checking notification permission and scheduling a test reminder..."
+                                    Task {
+                                        let snapshot = await DailyReminderScheduler.shared.sendTestNotification()
+                                        await MainActor.run {
+                                            notificationDebugMessage = snapshot.summary
+                                            isCheckingNotificationStatus = false
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!notificationsEnabled || isCheckingNotificationStatus)
+
+                                Button("Check Permission") {
+                                    isCheckingNotificationStatus = true
+                                    notificationDebugMessage = "Reading current notification settings..."
+                                    Task {
+                                        let snapshot = await DailyReminderScheduler.shared.permissionDebugSnapshot()
+                                        await MainActor.run {
+                                            notificationDebugMessage = snapshot.summary
+                                            isCheckingNotificationStatus = false
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(isCheckingNotificationStatus)
+                            }
+                        }
+
+                        Text(notificationDebugMessage)
+                            .font(.system(.footnote, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 18)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+                            )
+                            .padding(.horizontal, 18)
+                            .padding(.top, 18)
+                    }
+                }
+
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "Visuals",
+                            description: "Adjust readability and the app’s overall look."
+                        )
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "UI Scale",
+                            description: "Use Command-Plus, Command-Minus, or Command-0 anywhere in the app."
+                        ) {
+                            HStack(spacing: 10) {
+                                Button {
+                                    uiScaleController.zoomOut()
+                                } label: {
+                                    Label("Smaller", systemImage: "minus")
+                                }
+
+                                Button {
+                                    uiScaleController.zoomIn()
+                                } label: {
+                                    Label("Larger", systemImage: "plus")
+                                }
+
+                                Text("\(Int((uiScaleController.scale * 100).rounded()))%")
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .monospacedDigit()
+                                    .frame(width: 58, alignment: .trailing)
+
+                                Button("Reset") {
+                                    uiScaleController.reset()
+                                }
+                                .disabled(uiScaleController.isDefaultScale)
+                            }
+                        }
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Theme Tint",
+                            description: "A soft accent wash for translucent cards and panels."
+                        ) {
+                            HStack(spacing: 12) {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(themeTintColor)
+                                    .frame(width: 30, height: 30)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .stroke(Color.secondary.opacity(0.28), lineWidth: 1)
+                                    )
+
+                                ColorPicker(
+                                    "Shade Color",
+                                    selection: Binding(
+                                        get: { themeTintColor },
+                                        set: { newValue in
+                                            guard let color = NSColor(newValue).usingColorSpace(.sRGB) else { return }
+                                            var red: CGFloat = 0
+                                            var green: CGFloat = 0
+                                            var blue: CGFloat = 0
+                                            var alpha: CGFloat = 0
+                                            color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+                                            themeTintRed = Double(red)
+                                            themeTintGreen = Double(green)
+                                            themeTintBlue = Double(blue)
+                                            themeTintOpacity = Double(alpha)
+                                        }
+                                    ),
+                                    supportsOpacity: true
+                                )
+                                .labelsHidden()
+                            }
+                        }
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Sidebar Images",
+                            description: "Open the app-managed folder and drag transparent PNGs into it. Best results come from artwork with the main subject centered and generous empty space around it."
+                        ) {
+                            HStack(spacing: 10) {
+                                Text(sidebarImagesDirectoryLabel)
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(minWidth: 120, alignment: .trailing)
+
+                                Button("Open Folder") {
+                                    if let sidebarImagesDirectoryURL {
+                                        PersistenceController.prepareDecorativeImagesDirectoryIfNeeded()
+                                        NSWorkspace.shared.open(sidebarImagesDirectoryURL)
+                                        reloadDecorativeImageCandidatesIfNeeded(force: true)
+                                        decorativeImageCycleOffset = 0
+                                        refreshDecorativeImagePresentation()
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
                     }
+                }
 
-                    Button("Open Storage Directory") {
-                        if let directory = PersistenceController.storeDirectoryURL() {
-                            NSWorkspace.shared.open(directory)
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "Background Audio",
+                            description: "Keep audio behavior, cache access, and launch preferences here."
+                        )
+
+                        settingsDivider()
+
+                        settingsToggleRow(
+                            title: "Enable Background Audio",
+                            description: "Keep the mini player and library ready without autoplaying on launch.",
+                            isOn: Binding(
+                                get: { backgroundAudioEnabled },
+                                set: { newValue in
+                                    backgroundAudioEnabled = newValue
+                                    if !newValue {
+                                        backgroundAudioController.pause()
+                                    }
+                                }
+                            )
+                        )
+
+                        settingsDivider()
+
+                        settingsToggleRow(
+                            title: "Auto Resume",
+                            description: "Load the mixer state on launch without automatically turning tiles back on.",
+                            isOn: $backgroundAudioAutoResume
+                        )
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Master Volume",
+                            description: "Adjust the overall level across all active sound-effect tiles."
+                        ) {
+                            HStack(spacing: 12) {
+                                Slider(
+                                    value: Binding(
+                                        get: { backgroundAudioController.masterVolume },
+                                        set: { backgroundAudioController.setMasterVolume($0) }
+                                    ),
+                                    in: 0...1
+                                )
+                                .frame(width: 180)
+
+                                Text("\(Int((backgroundAudioController.masterVolume * 100).rounded()))%")
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .monospacedDigit()
+                                    .frame(width: 44, alignment: .trailing)
+                            }
+                        }
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Cache Folder",
+                            description: "Open the local cache for downloaded Pixabay sound effects or force a metadata refresh."
+                        ) {
+                            HStack(spacing: 10) {
+                                Button("Open Cache") {
+                                    backgroundAudioController.openEffectsCacheFolder()
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button("Refresh") {
+                                    backgroundAudioController.loadLibrary()
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Open Mixer",
+                            description: "Go to the dedicated sidebar page for tiles, balancing, and live playback."
+                        ) {
+                            Button("Open Sound Mixer") {
+                                detailMode = .soundMixer
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+
+                        settingsDivider()
+
+                        Text(backgroundAudioController.statusMessage)
+                            .font(.system(.footnote, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 18)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+                            )
+                            .padding(.horizontal, 18)
+                            .padding(.top, 18)
+                    }
+                }
+
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "About",
+                            description: "Quick links related to the app and its author."
+                        )
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "GitHub",
+                            description: "Open the developer profile in your browser."
+                        ) {
+                            if let githubURL = URL(string: "https://github.com/bogas04") {
+                                Link(
+                                    "github.com/bogas04",
+                                    destination: githubURL
+                                )
+                                .buttonStyle(.bordered)
+                            } else {
+                                Text("GitHub link unavailable")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
-                    .buttonStyle(.bordered)
+                }
 
-                    HStack(spacing: 10) {
-                        Button("Export Data (JSON)") {
-                            exportDataJSON()
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "Storage",
+                            description: "Import, export, inspect, or clear local planner data."
+                        )
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Data Tools",
+                            description: "Export a snapshot, import one, or inspect the local storage folder."
+                        ) {
+                            HStack(spacing: 10) {
+                                Button("Export") {
+                                    exportDataJSON()
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button("Import") {
+                                    importDataJSON()
+                                }
+                                .buttonStyle(.bordered)
+                                .help("Import replaces all current days, todos, and links.")
+
+                                Button("Open Folder") {
+                                    if let directory = PersistenceController.storeDirectoryURL() {
+                                        NSWorkspace.shared.open(directory)
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
-                        .buttonStyle(.bordered)
 
-                        Button("Import Data (JSON)") {
-                            importDataJSON()
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Logs",
+                            description: "Open Console or export recent unified logs for Focused Day Planner."
+                        ) {
+                            HStack(spacing: 10) {
+                                Button("Open Console") {
+                                    AppLogAccess.openConsoleApp()
+                                }
+                                .buttonStyle(.bordered)
+
+                                Button("Export Recent Logs") {
+                                    exportRecentLogs()
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
-                        .buttonStyle(.bordered)
-                        .help("Import replaces all current days, todos, and links.")
-                    }
 
-                    Divider()
+                        settingsDivider()
 
-                    Button("Delete All Data", role: .destructive) {
-                        showingDeleteAllDataConfirmation = true
+                        settingsControlRow(
+                            title: "Danger Zone",
+                            description: "Remove all days, ratings, todos, and local planner history from this Mac."
+                        ) {
+                            Button("Delete All Data", role: .destructive) {
+                                showingDeleteAllDataConfirmation = true
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
                 }
             }
             .padding(28)
-            .frame(maxWidth: 980, alignment: .leading)
+            .frame(maxWidth: 900, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .confirmationDialog(
@@ -781,6 +1325,290 @@ struct PlannerRootView: View {
         }
     }
 
+    private func settingsSectionHeader(title: String, description: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 19, weight: .semibold, design: .rounded))
+            Text(description)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+        .padding(.bottom, 16)
+    }
+
+    private func settingsDivider() -> some View {
+        Divider()
+            .padding(.horizontal, 18)
+    }
+
+    private func settingsToggleRow(title: String, description: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text(description)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 24)
+
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+
+    private func settingsValueRow(title: String, description: String, value: String) -> some View {
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text(description)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 24)
+
+            Text(value)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+
+    private func settingsControlRow<Control: View>(
+        title: String,
+        description: String,
+        @ViewBuilder control: () -> Control
+    ) -> some View {
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Text(description)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 24)
+
+            control()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+
+    private var soundMixerView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Sound Mixer")
+                            .font(.system(size: 30, weight: .semibold, design: .rounded))
+                        Text("Build a custom background mix from looping sound-effect tiles.")
+                            .font(.system(size: 15, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "Live Mix",
+                            description: "Click a tile to balance active sounds evenly. Drag across a tile to set its exact level."
+                        )
+
+                        settingsDivider()
+
+                        settingsControlRow(
+                            title: "Playback",
+                            description: backgroundAudioController.isPlaying
+                                ? "Your current mix is playing."
+                                : "Resume the mix without losing the tile percentages."
+                        ) {
+                            HStack(spacing: 10) {
+                                Button(backgroundAudioController.isPlaying ? "Pause Mix" : "Resume Mix") {
+                                    if backgroundAudioEnabled {
+                                        backgroundAudioController.togglePlayback()
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(!backgroundAudioEnabled || backgroundAudioController.activeSoundCount == 0)
+
+                                if backgroundAudioController.isLoading {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+
+                                Text("\(backgroundAudioController.activeSoundCount) active")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 120, alignment: .leading)
+                            }
+                        }
+
+                        settingsDivider()
+
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("Sound Tiles")
+                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+
+                            LazyVGrid(columns: soundMixerColumns, spacing: 14) {
+                                ForEach(backgroundAudioController.soundEffects) { effect in
+                                    soundMixerTile(for: effect)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 18)
+
+                        settingsDivider()
+
+                        Text(backgroundAudioController.statusMessage)
+                            .font(.system(.footnote, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 18)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+                            )
+                            .padding(.horizontal, 18)
+                            .padding(.top, 18)
+                    }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 900, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .onAppear {
+            backgroundAudioController.loadLibraryIfNeeded()
+        }
+    }
+
+    private func soundMixerTile(for effect: SoundEffectDefinition) -> some View {
+        let level = backgroundAudioController.mixLevel(for: effect.id)
+
+        return GeometryReader { proxy in
+            let fillWidth = proxy.size.width * level
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.75))
+
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.accentColor.opacity(level > 0 ? 0.22 : 0.08))
+                    .frame(width: max(fillWidth, level > 0 ? 16 : 0))
+
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(level > 0 ? Color.accentColor.opacity(0.45) : Color.secondary.opacity(0.2), lineWidth: level > 0 ? 1.5 : 1)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(effect.title)
+                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            Text(effect.subtitle)
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 8)
+                        Text("\(Int((level * 100).rounded()))%")
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(level > 0 ? Color.accentColor : .secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    HStack {
+                        Text("Click to balance")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("Drag to mix")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(14)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let dragDistance = abs(value.translation.width) + abs(value.translation.height)
+                        guard dragDistance > 4 else { return }
+                        let proportion = min(max(value.location.x / max(proxy.size.width, 1), 0), 1)
+                        backgroundAudioController.setMixLevel(for: effect.id, value: proportion)
+                    }
+                    .onEnded { value in
+                        let dragDistance = abs(value.translation.width) + abs(value.translation.height)
+                        if dragDistance <= 4 {
+                            backgroundAudioController.toggleSoundEffect(effect.id)
+                        } else {
+                            let proportion = min(max(value.location.x / max(proxy.size.width, 1), 0), 1)
+                            backgroundAudioController.setMixLevel(for: effect.id, value: proportion)
+                        }
+                    }
+            )
+        }
+        .frame(height: 132)
+    }
+
+    @ViewBuilder
+    private var backgroundAudioMiniBar: some View {
+        if backgroundAudioEnabled {
+            HStack(spacing: 10) {
+                Button {
+                    backgroundAudioController.togglePlayback()
+                } label: {
+                    Image(systemName: backgroundAudioController.isPlaying ? "pause.fill" : "play.fill")
+                }
+                .disabled(backgroundAudioController.activeSoundCount == 0)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Background Audio")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                    Text(backgroundAudioController.isLoading ? "Loading effects..." : "\(backgroundAudioController.activeSoundCount) active tile\(backgroundAudioController.activeSoundCount == 1 ? "" : "s")")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(width: 170, alignment: .leading)
+
+                Slider(
+                    value: Binding(
+                        get: { backgroundAudioController.masterVolume },
+                        set: { backgroundAudioController.setMasterVolume($0) }
+                    ),
+                    in: 0...1
+                )
+                .frame(width: 92)
+
+                if backgroundAudioController.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+
     private var statsView: some View {
         let ratedValues = dayPlans.compactMap(\.dayRating)
         let overallRating: Double? = ratedValues.isEmpty
@@ -788,36 +1616,130 @@ struct PlannerRootView: View {
             : Double(ratedValues.reduce(0) { $0 + $1 }) / Double(ratedValues.count)
         let thisWeekDonePerDay = averageDonePerDay(weekOffsetFromCurrent: 0)
         let previousWeekDonePerDay = averageDonePerDay(weekOffsetFromCurrent: -1)
+        let selectedWeek = weeklyRatingSummary(weekOffsetFromCurrent: weeklyRatingsOffset)
+        let thisWeekRating = weeklyAverageRating(weekOffsetFromCurrent: 0)
+        let previousWeekRating = weeklyAverageRating(weekOffsetFromCurrent: -1)
+        let ratingChangeText = weeklyRatingChangeText(current: thisWeekRating, previous: previousWeekRating)
+        let trendWeeks = weeklyRatingTrendSummaries(limit: 8)
 
         return ScrollView {
-            sectionCard {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("Stats")
-                        .font(.largeTitle)
-                        .fontWeight(.semibold)
+            VStack(alignment: .leading, spacing: 20) {
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("Stats")
+                            .font(.largeTitle)
+                            .fontWeight(.semibold)
 
-                    HStack {
-                        Text("Overall Rating")
-                            .font(.title3)
-                        Spacer()
-                        Text(overallRating.map { String(format: "%.1f/10", $0) } ?? "-")
-                            .font(.title3.weight(.semibold))
+                        HStack {
+                            Text("Overall Rating")
+                                .font(.title3)
+                            Spacer()
+                            Text(overallRating.map { String(format: "%.1f/10", $0) } ?? "-")
+                                .font(.title3.weight(.semibold))
+                        }
+
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("This Week's Rating")
+                                .font(.title3)
+                            Spacer()
+                            Text(thisWeekRating.map { String(format: "%.1f/10", $0) } ?? "-")
+                                .font(.title3.weight(.semibold))
+                            if let ratingChangeText {
+                                Text("(\(ratingChangeText) from last week)")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(ratingChangeText.hasPrefix("+") ? .green : .secondary)
+                            }
+                        }
+
+                        HStack {
+                            Text("Todos Done/Day (This Week)")
+                                .font(.title3)
+                            Spacer()
+                            Text(String(format: "%.1f", thisWeekDonePerDay))
+                                .font(.title3.weight(.semibold))
+                        }
+
+                        HStack {
+                            Text("Todos Done/Day (Previous Week)")
+                                .font(.title3)
+                            Spacer()
+                            Text(String(format: "%.1f", previousWeekDonePerDay))
+                                .font(.title3.weight(.semibold))
+                        }
                     }
+                }
 
-                    HStack {
-                        Text("Todos Done/Day (This Week)")
-                            .font(.title3)
-                        Spacer()
-                        Text(String(format: "%.1f", thisWeekDonePerDay))
-                            .font(.title3.weight(.semibold))
-                    }
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Text("Weekly Ratings")
+                                .font(.title2.weight(.semibold))
+                            Spacer()
+                            Button("Previous") {
+                                weeklyRatingsOffset -= 1
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(weeklyRatingsOffset <= earliestRatedWeekOffset)
 
-                    HStack {
-                        Text("Todos Done/Day (Previous Week)")
-                            .font(.title3)
-                        Spacer()
-                        Text(String(format: "%.1f", previousWeekDonePerDay))
-                            .font(.title3.weight(.semibold))
+                            Button("Next") {
+                                weeklyRatingsOffset += 1
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(weeklyRatingsOffset >= 0)
+                        }
+
+                        Text(selectedWeek.map { weekRangeLabel(for: $0.interval) } ?? "No ratings yet")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(selectedWeek?.averageRating.map { String(format: "%.1f/10", $0) } ?? "-")
+                                .font(.system(size: 34, weight: .semibold))
+                            Spacer()
+                            Text(selectedWeek.map { "\($0.ratedDaysCount) rated day\($0.ratedDaysCount == 1 ? "" : "s")" } ?? "")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if trendWeeks.isEmpty {
+                            Text("Add ratings to start seeing your weekly trend.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Recent Trend")
+                                    .font(.headline)
+
+                                ForEach(trendWeeks) { week in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            Text(weekShortLabel(for: week.interval))
+                                                .font(.subheadline.weight(.medium))
+                                            Spacer()
+                                            Text(week.averageRating.map { String(format: "%.1f", $0) } ?? "-")
+                                                .font(.subheadline.monospacedDigit())
+                                                .foregroundStyle(week.weekOffset == weeklyRatingsOffset ? .primary : .secondary)
+                                        }
+
+                                        GeometryReader { proxy in
+                                            let value = CGFloat((week.averageRating ?? 0) / 10.0)
+                                            ZStack(alignment: .leading) {
+                                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                    .fill(Color.secondary.opacity(0.12))
+                                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                    .fill(week.weekOffset == weeklyRatingsOffset ? Color.accentColor : Color.accentColor.opacity(0.45))
+                                                    .frame(width: proxy.size.width * value)
+                                            }
+                                        }
+                                        .frame(height: 10)
+                                    }
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        openJournal(for: week.interval)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -828,7 +1750,8 @@ struct PlannerRootView: View {
     }
 
     private var journalView: some View {
-        let totalDays = dayPlans.count
+        let entries = filteredJournalEntries
+        let totalDays = entries.count
         let startIndex = min(journalPage * journalPageSize, totalDays)
         let endIndex = min(startIndex + journalPageSize, totalDays)
 
@@ -837,18 +1760,24 @@ struct PlannerRootView: View {
                 sectionCard {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Journal")
-                            .font(.largeTitle)
-                            .fontWeight(.semibold)
+                            .font(scaledFont(32, weight: .semibold))
 
-                        Text("Read daily reflections with ratings, without switching into the todo view.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Read daily reflections with ratings, without switching into the todo view.")
+                                .font(scaledFont(14))
+                                .foregroundStyle(.secondary)
+                            if let journalDateRange {
+                                Text("Showing notes for \(weekRangeLabel(for: journalDateRange))")
+                                    .font(scaledFont(14, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
 
                         HStack {
                             Text(totalDays == 0
                                  ? "No days yet"
                                  : "Showing \(startIndex + 1)-\(endIndex) of \(totalDays)")
-                                .font(.subheadline)
+                                .font(scaledFont(14))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Button("Previous") {
@@ -858,7 +1787,7 @@ struct PlannerRootView: View {
                             .buttonStyle(.bordered)
 
                             Text("Page \(journalPage + 1) of \(journalPageCount)")
-                                .font(.subheadline)
+                                .font(scaledFont(14))
                                 .foregroundStyle(.secondary)
 
                             Button("Next") {
@@ -866,11 +1795,19 @@ struct PlannerRootView: View {
                             }
                             .disabled(journalPage >= journalPageCount - 1 || totalDays == 0)
                             .buttonStyle(.bordered)
+
+                            if journalDateRange != nil {
+                                Button("Show All") {
+                                    journalDateRange = nil
+                                    journalPage = 0
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
                     }
                 }
 
-                if dayPlans.isEmpty {
+                if entries.isEmpty {
                     ContentUnavailableView("No journal entries yet", systemImage: "book.closed")
                 } else {
                     ForEach(journalEntries) { plan in
@@ -885,14 +1822,23 @@ struct PlannerRootView: View {
     }
 
     private var journalPageCount: Int {
-        max(1, Int(ceil(Double(dayPlans.count) / Double(journalPageSize))))
+        max(1, Int(ceil(Double(filteredJournalEntries.count) / Double(journalPageSize))))
+    }
+
+    private var filteredJournalEntries: [DayPlan] {
+        guard let journalDateRange else { return dayPlans }
+        return dayPlans.filter { plan in
+            guard let date = store.date(from: plan.dateKey) else { return false }
+            return journalDateRange.contains(date)
+        }
     }
 
     private var journalEntries: [DayPlan] {
+        let source = filteredJournalEntries
         let start = journalPage * journalPageSize
-        guard start < dayPlans.count else { return [] }
-        let end = min(start + journalPageSize, dayPlans.count)
-        return Array(dayPlans[start..<end])
+        guard start < source.count else { return [] }
+        let end = min(start + journalPageSize, source.count)
+        return Array(source[start..<end])
     }
 
     private func clampJournalPage() {
@@ -900,16 +1846,22 @@ struct PlannerRootView: View {
         journalPage = min(max(journalPage, 0), maxPage)
     }
 
+    private func openJournal(for interval: DateInterval) {
+        journalDateRange = interval
+        journalPage = 0
+        detailMode = .journal
+        weeklyRatingsOffset = weekOffset(for: interval)
+    }
+
     private func journalDayCard(for plan: DayPlan) -> some View {
         sectionCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(formattedDayLabel(for: plan.dateKey))
-                        .font(.title3)
-                        .fontWeight(.semibold)
+                        .font(scaledFont(20, weight: .semibold))
                     Spacer()
                     Text("Rating: \(plan.dayRating.map { "\($0)/10" } ?? "-")")
-                        .font(.subheadline)
+                        .font(scaledFont(14))
                         .foregroundStyle(.secondary)
                     Button("Open Day") {
                         selectedDateKey = plan.dateKey
@@ -919,9 +1871,9 @@ struct PlannerRootView: View {
                 }
 
                 Text("Reflection")
-                    .font(.subheadline.weight(.semibold))
+                    .font(scaledFont(14, weight: .semibold))
                 Text(journalReflectionText(for: plan))
-                    .font(.body)
+                    .font(scaledFont(16))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -954,7 +1906,7 @@ struct PlannerRootView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Text(formattedDayLabel(for: plan.dateKey))
-                            .font(.system(size: 38, weight: .semibold))
+                            .font(.system(size: uiScaleController.scaledMetric(38), weight: .semibold))
                         Image(systemName: "pencil")
                             .font(.title2)
                     }
@@ -991,21 +1943,19 @@ struct PlannerRootView: View {
 
                 HStack(spacing: 12) {
                     Text("Day Rating")
-                        .font(.title3)
-                        .fontWeight(.medium)
+                        .font(scaledFont(20, weight: .medium))
 
                     StarRatingView(rating: Binding(
                         get: { plan.dayRating },
                         set: { newValue in
                             store.updateDayRating(newValue, for: plan)
                         }
-                    ))
+                    ), scale: uiScaleController.scale)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Reflection")
-                        .font(.title3)
-                        .fontWeight(.medium)
+                        .font(scaledFont(20, weight: .medium))
                     ZStack(alignment: .topLeading) {
                         TextEditor(text: Binding(
                             get: { plan.reflection ?? "" },
@@ -1013,21 +1963,24 @@ struct PlannerRootView: View {
                                 store.updateDayReflection(newValue, for: plan)
                             }
                         ))
-                        .font(.body)
+                        .font(scaledFont(16))
                         .scrollContentBackground(.hidden)
                         .background(Color.clear)
-                        .frame(minHeight: 78, maxHeight: 78)
+                        .frame(
+                            minHeight: uiScaleController.scaledMetric(78),
+                            maxHeight: uiScaleController.scaledMetric(78)
+                        )
 
                         if (plan.reflection ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             Text(reflectionPrompts[reflectionPlaceholderIndex])
-                                .font(.body)
+                                .font(scaledFont(16))
                                 .foregroundStyle(.secondary)
-                                .padding(.leading, 6)
-                                .padding(.top, 1)
+                                .padding(.leading, uiScaleController.scaledMetric(6))
+                                .padding(.top, uiScaleController.scaledMetric(1))
                                 .allowsHitTesting(false)
                         }
                     }
-                    .padding(10)
+                    .padding(uiScaleController.scaledMetric(10))
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
@@ -1061,9 +2014,9 @@ struct PlannerRootView: View {
             VStack(alignment: .leading, spacing: 16) {
                 TextField("Type a task and press Enter", text: $todoInput)
                     .textFieldStyle(.plain)
-                    .font(.title3)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .font(scaledFont(20))
+                    .padding(.horizontal, uiScaleController.scaledMetric(14))
+                    .padding(.vertical, uiScaleController.scaledMetric(12))
                     .background(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .fill(Color(nsColor: .textBackgroundColor).opacity(0.8))
@@ -1090,12 +2043,7 @@ struct PlannerRootView: View {
                                         plan: plan,
                                         store: store,
                                         draggedToken: $draggedTodoToken,
-                                        tokenForTodo: todoDragToken(_:),
-                                        onMove: { source, target, dayPlan in
-                                            withAnimation(.easeInOut(duration: 0.18)) {
-                                                store.moveTodo(source, in: dayPlan, to: target)
-                                            }
-                                        }
+                                        tokenForTodo: todoDragToken(_:)
                                     )
                                 )
                         }
@@ -1125,7 +2073,7 @@ struct PlannerRootView: View {
                 store.touchTodo(todo)
             } label: {
                 Image(systemName: todo.isDone ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(.system(size: uiScaleController.scaledMetric(24), weight: .semibold))
                     .foregroundStyle(todo.isDone ? Color.accentColor : Color.secondary)
             }
             .buttonStyle(.plain)
@@ -1133,7 +2081,7 @@ struct PlannerRootView: View {
             todoContent(todo: todo)
 
             Text(todo.source == .rollover ? "Carry" : "New")
-                .font(.subheadline)
+                .font(scaledFont(14))
                 .foregroundStyle(.secondary)
 
             if showDayActions {
@@ -1162,7 +2110,7 @@ struct PlannerRootView: View {
             }
             .buttonStyle(.borderless)
         }
-        .frame(minHeight: 44)
+        .frame(minHeight: uiScaleController.scaledMetric(44))
     }
 
     private func requestCarryForward(todo: TodoItem, in plan: DayPlan) {
@@ -1230,26 +2178,28 @@ struct PlannerRootView: View {
 
     @ViewBuilder
     private func todoContent(todo: TodoItem) -> some View {
-        if let parsed = TodoTextFormatter.parseFirstURL(from: todo.title), !editingLinkedTodos.contains(todo.persistentModelID) {
+        let parsedLink = TodoTextFormatter.parseFirstURL(from: todo.title)
+
+        if let parsed = parsedLink, !editingLinkedTodos.contains(todo.persistentModelID) {
             HStack(spacing: 0) {
                 Button {
                     NSWorkspace.shared.open(parsed.url)
                 } label: {
                     Text(formattedTodoText(from: parsed))
-                        .font(.title3)
+                        .font(scaledFont(20))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .multilineTextAlignment(.leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.horizontal, uiScaleController.scaledMetric(12))
+                .padding(.vertical, uiScaleController.scaledMetric(10))
 
                 Button {
                     beginLinkedTodoEdit(todoID: todo.persistentModelID)
                 } label: {
                     Text("Edit")
-                        .font(.subheadline.weight(.semibold))
+                        .font(scaledFont(14, weight: .semibold))
                 }
                 .buttonStyle(InlineEditButtonStyle(
                     isHovered: hoveredInlineEditTodoID == todo.persistentModelID
@@ -1258,15 +2208,15 @@ struct PlannerRootView: View {
                     hoveredInlineEditTodoID = hovering ? todo.persistentModelID : nil
                 }
                 .help("Edit linked todo")
-                .padding(.trailing, 10)
+                .padding(.trailing, uiScaleController.scaledMetric(10))
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, uiScaleController.scaledMetric(4))
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(Color(nsColor: .textBackgroundColor).opacity(0.8))
             )
             .frame(maxWidth: .infinity, alignment: .leading)
-        } else if TodoTextFormatter.parseFirstURL(from: todo.title) != nil {
+        } else if parsedLink != nil {
             VStack(alignment: .leading, spacing: 8) {
                 TextEditor(text: Binding(
                     get: { todo.title },
@@ -1275,9 +2225,9 @@ struct PlannerRootView: View {
                         store.touchTodo(todo)
                     }
                 ))
-                .font(.title3)
-                .frame(minHeight: 78)
-                .padding(8)
+                .font(scaledFont(20))
+                .frame(minHeight: uiScaleController.scaledMetric(78))
+                .padding(uiScaleController.scaledMetric(8))
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.gray.opacity(0.15))
@@ -1302,9 +2252,9 @@ struct PlannerRootView: View {
                 }
             ))
             .textFieldStyle(.plain)
-            .font(.title3)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .font(scaledFont(20))
+            .padding(.horizontal, uiScaleController.scaledMetric(12))
+            .padding(.vertical, uiScaleController.scaledMetric(10))
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(Color(nsColor: .textBackgroundColor).opacity(0.8))
@@ -1411,7 +2361,10 @@ struct PlannerRootView: View {
     }
 
     private var calendarGridView: some View {
-        ScrollView {
+        let weekdayHeaders = weekdayLabels()
+        let gridDates = monthGridDates(for: calendarMonth)
+
+        return ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     Button {
@@ -1438,15 +2391,15 @@ struct PlannerRootView: View {
                 }
 
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 120), spacing: 12), count: 7), spacing: 12) {
-                    ForEach(weekdayLabels(), id: \.self) { weekday in
+                    ForEach(weekdayHeaders, id: \.self) { weekday in
                         Text(weekday)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
                     }
 
-                    ForEach(monthGridDates(for: calendarMonth).indices, id: \.self) { index in
-                        if let date = monthGridDates(for: calendarMonth)[index] {
+                    ForEach(gridDates.indices, id: \.self) { index in
+                        if let date = gridDates[index] {
                             let key = store.dateKey(for: date)
                             let plan = planMap[key]
                             Button {
@@ -1537,6 +2490,16 @@ struct PlannerRootView: View {
         }
     }
 
+    private func exportRecentLogs() {
+        do {
+            let url = try AppLogAccess.exportRecentLogs()
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+            dataTransferMessage = "Recent app logs exported:\n\(url.path)"
+        } catch {
+            dataTransferMessage = "Log export failed: \(error.localizedDescription)"
+        }
+    }
+
     private func sectionCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         content()
             .padding(20)
@@ -1591,17 +2554,14 @@ struct PlannerRootView: View {
     }
 
     private func weekdayLabels() -> [String] {
-        let formatter = DateFormatter()
-        formatter.locale = Locale.current
-        let symbols = formatter.shortStandaloneWeekdaySymbols ?? ["S", "M", "T", "W", "T", "F", "S"]
+        Self.monthTitleFormatter.locale = Locale.current
+        let symbols = Self.monthTitleFormatter.shortStandaloneWeekdaySymbols ?? ["S", "M", "T", "W", "T", "F", "S"]
         let first = calendar.firstWeekday - 1
         return Array(symbols[first...] + symbols[..<first])
     }
 
     private func monthTitle(for date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "LLLL yyyy"
-        return formatter.string(from: date)
+        Self.monthTitleFormatter.string(from: date)
     }
 
     private func dayNumber(from date: Date) -> String {
@@ -1612,19 +2572,14 @@ struct PlannerRootView: View {
         guard let date = store.date(from: dateKey) else {
             return dateKey
         }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .full
-        formatter.timeStyle = .none
-        return formatter.string(from: date)
+        return Self.fullDayFormatter.string(from: date)
     }
 
     private func shortDayLabel(for dateKey: String) -> String {
         guard let date = store.date(from: dateKey) else {
             return dateKey
         }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return formatter.string(from: date)
+        return Self.shortDayFormatter.string(from: date)
     }
 
     private func averageDonePerDay(weekOffsetFromCurrent offset: Int) -> Double {
@@ -1641,6 +2596,87 @@ struct PlannerRootView: View {
         return Double(totalDone) / 7.0
     }
 
+    private func weekInterval(weekOffsetFromCurrent offset: Int) -> DateInterval? {
+        guard let thisWeekInterval = calendar.dateInterval(of: .weekOfYear, for: .now),
+              let start = calendar.date(byAdding: .weekOfYear, value: offset, to: thisWeekInterval.start) else {
+            return nil
+        }
+        return calendar.dateInterval(of: .weekOfYear, for: start)
+    }
+
+    private func weeklyAverageRating(weekOffsetFromCurrent offset: Int) -> Double? {
+        weeklyRatingSummary(weekOffsetFromCurrent: offset)?.averageRating
+    }
+
+    private func weeklyRatingSummary(weekOffsetFromCurrent offset: Int) -> WeeklyRatingSummary? {
+        guard let interval = weekInterval(weekOffsetFromCurrent: offset) else { return nil }
+        let ratings = dayPlans.compactMap { plan -> Int? in
+            guard let rating = plan.dayRating,
+                  let date = store.date(from: plan.dateKey),
+                  interval.contains(date) else {
+                return nil
+            }
+            return rating
+        }
+
+        let averageRating = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
+        return WeeklyRatingSummary(
+            weekOffset: offset,
+            interval: interval,
+            averageRating: averageRating,
+            ratedDaysCount: ratings.count
+        )
+    }
+
+    private var earliestRatedWeekOffset: Int {
+        guard let currentWeekStart = weekInterval(weekOffsetFromCurrent: 0)?.start else {
+            return 0
+        }
+
+        let offsets = dayPlans.compactMap { plan -> Int? in
+            guard plan.dayRating != nil,
+                  let date = store.date(from: plan.dateKey),
+                  let weekStart = calendar.dateInterval(of: .weekOfYear, for: date)?.start else {
+                return nil
+            }
+            return calendar.dateComponents([.weekOfYear], from: currentWeekStart, to: weekStart).weekOfYear
+        }
+
+        return min(offsets.min() ?? 0, 0)
+    }
+
+    private func weeklyRatingTrendSummaries(limit: Int) -> [WeeklyRatingSummary] {
+        guard limit > 0 else { return [] }
+        let startOffset = max(earliestRatedWeekOffset, -(limit - 1))
+        return (startOffset...0).compactMap { weeklyRatingSummary(weekOffsetFromCurrent: $0) }
+    }
+
+    private func weekOffset(for interval: DateInterval) -> Int {
+        guard let currentWeekStart = weekInterval(weekOffsetFromCurrent: 0)?.start else {
+            return 0
+        }
+        return calendar.dateComponents([.weekOfYear], from: currentWeekStart, to: interval.start).weekOfYear ?? 0
+    }
+
+    private func weeklyRatingChangeText(current: Double?, previous: Double?) -> String? {
+        guard let current, let previous, previous != 0 else { return nil }
+        let delta = ((current - previous) / previous) * 100
+        return String(format: "%+.0f%%", delta)
+    }
+
+    private func weekRangeLabel(for interval: DateInterval) -> String {
+        let endDate = calendar.date(byAdding: .day, value: -1, to: interval.end) ?? interval.end
+        return "\(Self.shortDayFormatter.string(from: interval.start)) - \(Self.shortDayFormatter.string(from: endDate))"
+    }
+
+    private func weekShortLabel(for interval: DateInterval) -> String {
+        Self.shortDayFormatter.string(from: interval.start)
+    }
+
+    private func clampWeeklyRatingsOffset() {
+        weeklyRatingsOffset = min(max(weeklyRatingsOffset, earliestRatedWeekOffset), 0)
+    }
+
     private func summaryText(for plan: DayPlan) -> String {
         let total = plan.todos.count
         let done = plan.todos.filter(\.isDone).count
@@ -1648,8 +2684,18 @@ struct PlannerRootView: View {
     }
 }
 
+private struct WeeklyRatingSummary: Identifiable {
+    let weekOffset: Int
+    let interval: DateInterval
+    let averageRating: Double?
+    let ratedDaysCount: Int
+
+    var id: Int { weekOffset }
+}
+
 private struct StarRatingView: View {
     @Binding var rating: Int?
+    let scale: Double
 
     var body: some View {
         HStack(spacing: 5) {
@@ -1658,7 +2704,7 @@ private struct StarRatingView: View {
                     rating = value
                 } label: {
                     Image(systemName: (rating ?? 0) >= value ? "star.fill" : "star")
-                        .font(.title3)
+                        .font(.system(size: 20 * scale))
                         .foregroundStyle((rating ?? 0) >= value ? .yellow : .secondary)
                 }
                 .buttonStyle(.plain)
@@ -1669,7 +2715,7 @@ private struct StarRatingView: View {
                 rating = nil
             }
             .buttonStyle(.borderless)
-            .font(.subheadline)
+            .font(.system(size: 14 * scale))
         }
     }
 }
@@ -1680,20 +2726,9 @@ private struct TodoReorderDropDelegate: DropDelegate {
     let store: PlannerStore
     @Binding var draggedToken: String?
     let tokenForTodo: (TodoItem) -> String
-    let onMove: (TodoItem, Int, DayPlan) -> Void
 
     func dropEntered(info: DropInfo) {
-        guard let draggedToken else { return }
-
-        let todos = store.sortedTodos(for: plan)
-        guard let sourceTodo = todos.first(where: { tokenForTodo($0) == draggedToken }),
-              let fromIndex = todos.firstIndex(where: { $0.persistentModelID == sourceTodo.persistentModelID }),
-              let toIndex = todos.firstIndex(where: { $0.persistentModelID == target.persistentModelID }),
-              fromIndex != toIndex else {
-            return
-        }
-
-        onMove(sourceTodo, toIndex, plan)
+        _ = info
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -1701,7 +2736,18 @@ private struct TodoReorderDropDelegate: DropDelegate {
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        draggedToken = nil
+        defer { draggedToken = nil }
+        guard let draggedToken else { return false }
+
+        let todos = store.sortedTodos(for: plan)
+        guard let sourceTodo = todos.first(where: { tokenForTodo($0) == draggedToken }),
+              let toIndex = todos.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) else {
+            return false
+        }
+
+        withAnimation(.easeInOut(duration: 0.18)) {
+            store.moveTodo(sourceTodo, in: plan, to: toIndex)
+        }
         return true
     }
 }

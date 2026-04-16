@@ -7,20 +7,34 @@ enum PersistenceController {
     private static let storeDirectoryName = "FocusedDayPlanner"
     private static let storeFileName = "FocusedDayPlanner.store"
     private static let metadataFileName = "StoreMetadata.json"
+    private static let decorativeImagesDirectoryName = "Sidebar Images"
 
     static func makeModelContainer() throws -> ModelContainer {
+        try makeModelContainer(storedInMemoryOnly: false)
+    }
+
+    static func makeInMemoryModelContainer() throws -> ModelContainer {
+        try makeModelContainer(storedInMemoryOnly: true)
+    }
+
+    private static func makeModelContainer(storedInMemoryOnly: Bool) throws -> ModelContainer {
         let schema = Schema([
             DayPlan.self,
             TodoItem.self,
             LinearLink.self
         ])
 
-        let storeDirectory = try ensureStoreDirectory()
-        let storeURL = storeDirectory.appendingPathComponent(storeFileName)
-        try importLegacyStoreIfNeeded(targetStoreURL: storeURL)
-        try migrateIfNeeded(storeDirectory: storeDirectory)
+        let config: ModelConfiguration
+        if storedInMemoryOnly {
+            config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        } else {
+            let storeDirectory = try ensureStoreDirectory()
+            let storeURL = storeDirectory.appendingPathComponent(storeFileName)
+            try importLegacyStoreIfNeeded(targetStoreURL: storeURL)
+            try migrateIfNeeded(storeDirectory: storeDirectory)
+            config = ModelConfiguration(schema: schema, url: storeURL)
+        }
 
-        let config = ModelConfiguration(schema: schema, url: storeURL)
         return try ModelContainer(for: schema, configurations: [config])
     }
 
@@ -37,6 +51,14 @@ enum PersistenceController {
         try? ensureStoreDirectory()
     }
 
+    static func decorativeImagesDirectoryURL() -> URL? {
+        try? ensureStoreDirectory().appendingPathComponent(decorativeImagesDirectoryName, isDirectory: true)
+    }
+
+    static func prepareDecorativeImagesDirectoryIfNeeded() {
+        _ = try? ensureDecorativeImagesDirectory()
+    }
+
     private static func ensureStoreDirectory() throws -> URL {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw PersistenceError.appSupportUnavailable
@@ -45,6 +67,58 @@ enum PersistenceController {
         let directory = appSupport.appendingPathComponent(storeDirectoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private static func ensureDecorativeImagesDirectory() throws -> URL {
+        let directory = try ensureStoreDirectory().appendingPathComponent(decorativeImagesDirectoryName, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try seedDecorativeImagesIfNeeded(into: directory)
+        return directory
+    }
+
+    private static func seedDecorativeImagesIfNeeded(into directory: URL) throws {
+        let fileManager = FileManager.default
+        let existingFiles = (try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        if existingFiles.contains(where: { isDecorativeImageFile($0.lastPathComponent) }) {
+            return
+        }
+
+        var seedFiles: [URL] = []
+        if let resourceURL = Bundle.main.resourceURL,
+           let bundledFiles = try? fileManager.contentsOfDirectory(
+                at: resourceURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+           ) {
+            seedFiles += bundledFiles.filter { isDecorativeImageFile($0.lastPathComponent) }
+        }
+
+        let localAssetsURL = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent("assets", isDirectory: true)
+        if let enumerator = fileManager.enumerator(
+            at: localAssetsURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator where isDecorativeImageFile(fileURL.lastPathComponent) {
+                seedFiles.append(fileURL)
+            }
+        }
+
+        for fileURL in seedFiles {
+            let destinationURL = directory.appendingPathComponent(fileURL.lastPathComponent)
+            guard !fileManager.fileExists(atPath: destinationURL.path) else { continue }
+            try? fileManager.copyItem(at: fileURL, to: destinationURL)
+        }
+    }
+
+    private static func isDecorativeImageFile(_ fileName: String) -> Bool {
+        let lowercased = fileName.lowercased()
+        return lowercased.hasPrefix("image-") && lowercased.hasSuffix(".png")
     }
 
     private static func importLegacyStoreIfNeeded(targetStoreURL: URL) throws {

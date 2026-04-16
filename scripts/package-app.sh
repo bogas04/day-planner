@@ -88,6 +88,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+codesign --force --deep --sign - "$APP_DIR"
+
 echo "Created app bundle: $APP_DIR"
 echo "Version: $MARKETING_VERSION ($BUILD_NUMBER)"
 
