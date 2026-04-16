@@ -52,6 +52,39 @@ The Sound Mixer is a dedicated sidebar page for building a background ambience m
   - soothing ocean waves
   - busy restaurant ambience
 
+## Credits And Licensing
+FocusedDayPlanner includes third-party media references and bundled decorative artwork. Keep this section up to date whenever media assets change.
+
+### Sound Effects
+The built-in sound mixer currently resolves audio from Pixabay sound-effect pages at runtime and caches the downloaded files locally.
+
+- License basis: Pixabay states its content is free to use, attribution is not required, and use is governed by the Pixabay Content License summary:
+  - [Pixabay Content License Summary](https://pixabay.com/service/license-summary/)
+- Current configured sound pages and creator credits:
+  - [walking-on-leaves](https://pixabay.com/sound-effects/walking-on-leaves-260279/) by `MUSICHOLDER`
+  - [wind-whistling-window-frame](https://pixabay.com/sound-effects/wind-whistling-window-frame-70595/) by `pavelvon` / `freesound_community`
+  - [thunderstorm](https://pixabay.com/sound-effects/thunderstorm-14708/) by `regosss` / `freesound_community`
+  - [leaves-rustling](https://pixabay.com/sound-effects/leaves-rustling-14633/) by `ericnorcross81` / `freesound_community`
+  - [calming-rain](https://pixabay.com/sound-effects/calming-rain-257596/) by `Liecio`
+  - [soothing-ocean-waves](https://pixabay.com/sound-effects/soothing-ocean-waves-372489/) by `DRAGON-STUDIO`
+  - [busy-restaurant-dining-room-ambience](https://pixabay.com/sound-effects/busy-restaurant-dining-room-ambience-128466/) by `DOBCommunications`
+
+### Decorative Images
+The sidebar artwork currently ships from `assets/overlays/image-*.png`.
+
+- Current status: the original external source URLs and license notes for these bundled PNG files are not documented in-repo.
+- Recommendation: before wider distribution, document the exact origin and license for each decorative image or replace them with assets whose source and license are tracked in the repository.
+- Repository location:
+  - `assets/overlays/image-1.png`
+  - `assets/overlays/image-2.png`
+  - `assets/overlays/image-3.png`
+  - `assets/overlays/image-4.png`
+  - `assets/overlays/image-5.png`
+  - `assets/overlays/image-6.png`
+  - `assets/overlays/image-7.png`
+  - `assets/overlays/image-8.png`
+  - `assets/overlays/image-9.png`
+
 ## Notifications
 The app requests notification permission for planner reminders.
 
