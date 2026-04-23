@@ -59,20 +59,20 @@ struct WellnessBreakOverlayView: View {
                         Button("I’m Taking a Break") {
                             startBreakSession()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(ReadableProminentButtonStyle())
                         .controlSize(.large)
                     } else {
                         Button("Finish Early") {
                             dismiss()
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(ReadableProminentButtonStyle())
                         .controlSize(.large)
                     }
 
                     Button("Dismiss") {
                         dismiss()
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(ReadableSecondaryButtonStyle())
                     .controlSize(.large)
                 }
             }

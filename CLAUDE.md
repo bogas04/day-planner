@@ -1,6 +1,6 @@
 # Claude Notes
 
-Use [AGENTS.md](/Users/divjot.singh/Developer/FocusedDayPlanner/AGENTS.md) as the primary repository guide.
+Use [AGENTS.md](AGENTS.md) as the primary repository guide.
 
 This repo keeps the detailed architecture, invariants, testing expectations, and feature ownership notes in `AGENTS.md` so there is one source of truth for both humans and coding agents.
 

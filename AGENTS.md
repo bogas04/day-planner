@@ -7,7 +7,7 @@ This file is for future agents and new humans who need to make changes quickly w
 - Native macOS SwiftUI app built as a Swift Package.
 - Main target: `Sources/FocusedDayPlanner`
 - Tests: `Tests/FocusedDayPlannerTests`
-- Entry point: [FocusedDayPlannerApp.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/FocusedDayPlannerApp.swift)
+- Entry point: [FocusedDayPlannerApp.swift](Sources/FocusedDayPlanner/FocusedDayPlannerApp.swift)
 
 Run and verify with:
 
@@ -41,7 +41,7 @@ When adding behavior, prefer putting domain logic in `PlannerStore`, `PlannerRul
 - `LinearLink.sortOrder` is the ordering source of truth for links within a day.
 - `TodoItem.source` distinguishes manual tasks from rollover tasks.
 
-If you move or delete todos/links, keep sort order normalized. The helper methods in [PlannerStore.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/PlannerStore.swift) already do this; reuse them.
+If you move or delete todos/links, keep sort order normalized. The helper methods in [PlannerStore.swift](Sources/FocusedDayPlanner/PlannerStore.swift) already do this; reuse them.
 
 ### Save behavior
 
@@ -55,7 +55,7 @@ If a change affects todo counts, day creation, carry-forward behavior, or notifi
 
 ### Add or change planner behavior
 
-Start in [PlannerStore.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/PlannerStore.swift).
+Start in [PlannerStore.swift](Sources/FocusedDayPlanner/PlannerStore.swift).
 
 - Add todos: `addTodo`
 - Carry forward: `carryPendingTodosToNextDay`, `carryTodoToNextDay`
@@ -72,7 +72,7 @@ Notes:
 
 ### Add or change UI
 
-Start in [PlannerRootView.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/PlannerRootView.swift).
+Start in [PlannerRootView.swift](Sources/FocusedDayPlanner/PlannerRootView.swift).
 
 - This file is the app shell plus most screens.
 - Before adding more inline logic here, look for an existing controller/store/helper to extend instead.
@@ -80,7 +80,7 @@ Start in [PlannerRootView.swift](/Users/divjot.singh/Developer/FocusedDayPlanner
 
 ### Add or change persistence/schema
 
-Start in [PersistenceController.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/PersistenceController.swift).
+Start in [PersistenceController.swift](Sources/FocusedDayPlanner/PersistenceController.swift).
 
 - Bump `currentSchemaVersion` when a real migration is needed.
 - Add migration steps in `applyMigration(toVersion:storeDirectory:)`.
@@ -95,7 +95,7 @@ Storage locations already used by the app:
 
 ### Add or change reminders
 
-Start in [DailyReminderScheduler.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/DailyReminderScheduler.swift).
+Start in [DailyReminderScheduler.swift](Sources/FocusedDayPlanner/DailyReminderScheduler.swift).
 
 - Reminder scheduling is a side effect of planner state plus `AppSettings`.
 - The scheduler does nothing in unsupported environments, so CLI tests will not exercise full notification delivery.
@@ -109,7 +109,7 @@ When changing reminder policy:
 
 ### Add or change sound mixer behavior
 
-Start in [BackgroundAudioController.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/BackgroundAudioController.swift).
+Start in [BackgroundAudioController.swift](Sources/FocusedDayPlanner/BackgroundAudioController.swift).
 
 - `soundEffectsCatalog` is the curated built-in effect list.
 - Mixed effect levels live in `soundEffectLevels`.
@@ -125,7 +125,7 @@ Important behavior:
 
 ## Settings Pattern
 
-All persisted preferences should go through [AppSettings.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/AppSettings.swift).
+All persisted preferences should go through [AppSettings.swift](Sources/FocusedDayPlanner/AppSettings.swift).
 
 Preferred pattern:
 
@@ -141,9 +141,9 @@ This keeps ranges and defaults centralized instead of scattering clamping logic 
 
 Current coverage is small but useful:
 
-- [PlannerRulesTests.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Tests/FocusedDayPlannerTests/PlannerRulesTests.swift): deterministic policy helpers.
-- [PlannerStoreCarryForwardTests.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Tests/FocusedDayPlannerTests/PlannerStoreCarryForwardTests.swift): top insertion and carry-forward edge cases.
-- [BackgroundAudioControllerTests.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Tests/FocusedDayPlannerTests/BackgroundAudioControllerTests.swift): audio normalization and import behavior.
+- [PlannerRulesTests.swift](Tests/FocusedDayPlannerTests/PlannerRulesTests.swift): deterministic policy helpers.
+- [PlannerStoreCarryForwardTests.swift](Tests/FocusedDayPlannerTests/PlannerStoreCarryForwardTests.swift): top insertion and carry-forward edge cases.
+- [BackgroundAudioControllerTests.swift](Tests/FocusedDayPlannerTests/BackgroundAudioControllerTests.swift): audio normalization and import behavior.
 
 Add tests when changing:
 
@@ -175,11 +175,11 @@ If you fix a bug in `PlannerStore`, add or update a store test first when practi
 
 Read these files in order:
 
-1. [README.md](/Users/divjot.singh/Developer/FocusedDayPlanner/README.md)
-2. [FocusedDayPlannerApp.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/FocusedDayPlannerApp.swift)
-3. [PlannerRootView.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/PlannerRootView.swift)
-4. [PlannerStore.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/PlannerStore.swift)
-5. [AppSettings.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/AppSettings.swift)
-6. [PersistenceController.swift](/Users/divjot.singh/Developer/FocusedDayPlanner/Sources/FocusedDayPlanner/PersistenceController.swift)
+1. [README.md](README.md)
+2. [FocusedDayPlannerApp.swift](Sources/FocusedDayPlanner/FocusedDayPlannerApp.swift)
+3. [PlannerRootView.swift](Sources/FocusedDayPlanner/PlannerRootView.swift)
+4. [PlannerStore.swift](Sources/FocusedDayPlanner/PlannerStore.swift)
+5. [AppSettings.swift](Sources/FocusedDayPlanner/AppSettings.swift)
+6. [PersistenceController.swift](Sources/FocusedDayPlanner/PersistenceController.swift)
 
 That path gets you from app startup to view composition to real business logic quickly.

@@ -401,7 +401,7 @@ struct PlannerRootView: View {
                         }
                         executePendingCarryForward()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(ReadableProminentButtonStyle())
                 }
             }
             .padding(16)
@@ -1132,7 +1132,7 @@ struct PlannerRootView: View {
                                             }
                                         }
                                     }
-                                    .buttonStyle(.borderedProminent)
+                                    .buttonStyle(ReadableProminentButtonStyle())
                                     .disabled(!notificationsEnabled || isCheckingNotificationStatus)
 
                                     Button("Check Permission") {
@@ -1146,7 +1146,7 @@ struct PlannerRootView: View {
                                             }
                                         }
                                     }
-                                    .buttonStyle(.bordered)
+                                    .buttonStyle(ReadableSecondaryButtonStyle())
                                     .disabled(isCheckingNotificationStatus)
                                 }
                             }
@@ -2468,7 +2468,7 @@ struct PlannerRootView: View {
                             selectedDateKey = nextKey
                             detailMode = .day
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(ReadableProminentButtonStyle())
 
                         Image(systemName: "info.circle")
                             .foregroundStyle(.secondary)
