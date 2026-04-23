@@ -2,7 +2,10 @@ import SwiftUI
 
 struct WellnessBreakOverlayView: View {
     let prompt: WellnessBreakOverlayController.Prompt
+    let breakSessionEndDate: Date?
+    let startBreakSession: () -> Void
     let dismiss: () -> Void
+    @State private var hasAppeared = false
 
     var body: some View {
         ZStack {
@@ -36,16 +39,42 @@ struct WellnessBreakOverlayView: View {
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 560)
 
-                    Text("Take a minute. Blink. Breathe. Look far away.")
-                        .font(.system(size: 16, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary.opacity(0.92))
+                    if let breakSessionEndDate {
+                        Text("Break ends at \(timeText(for: breakSessionEndDate))")
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
+                            .padding(.top, 8)
+
+                        Text("Move around, stretch, or do a quick exercise until then.")
+                            .font(.system(size: 16, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary.opacity(0.92))
+                    } else {
+                        Text("Take a minute. Blink. Breathe. Look far away.")
+                            .font(.system(size: 16, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary.opacity(0.92))
+                    }
                 }
 
-                Button("I Took a Break") {
-                    dismiss()
+                HStack(spacing: 12) {
+                    if breakSessionEndDate == nil {
+                        Button("I’m Taking a Break") {
+                            startBreakSession()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                    } else {
+                        Button("Finish Early") {
+                            dismiss()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                    }
+
+                    Button("Dismiss") {
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
             }
             .padding(.horizontal, 40)
             .padding(.vertical, 42)
@@ -60,8 +89,26 @@ struct WellnessBreakOverlayView: View {
             )
             .padding(48)
         }
+        .opacity(hasAppeared ? 1 : 0)
         .contentShape(Rectangle())
-        .onTapGesture(perform: dismiss)
+        .onTapGesture {
+            if breakSessionEndDate == nil {
+                dismiss()
+            }
+        }
+        .onAppear {
+            hasAppeared = false
+            withAnimation(.easeInOut(duration: 5)) {
+                hasAppeared = true
+            }
+        }
+    }
+
+    private func timeText(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: date)
     }
 }
 

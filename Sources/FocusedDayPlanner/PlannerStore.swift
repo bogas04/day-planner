@@ -162,13 +162,17 @@ final class PlannerStore: ObservableObject {
 
         let manualCount = dayPlan.todos.filter { $0.source == .manual }.count
         let priority = PlannerRules.nextPriority(manualTodoCount: manualCount)
-        let sortOrder = (dayPlan.todos.map(\.sortOrder).max() ?? -1) + 1
+
+        for existing in dayPlan.todos {
+            existing.sortOrder += 1
+            existing.updatedAt = now
+        }
 
         let todo = TodoItem(
             title: trimmed,
             priority: priority,
             isDone: false,
-            sortOrder: sortOrder,
+            sortOrder: 0,
             source: .manual,
             createdAt: now,
             updatedAt: now,
@@ -579,8 +583,15 @@ final class PlannerStore: ObservableObject {
             totalTodos: totalTodos,
             pendingTodos: pendingTodos,
             notificationsEnabled: AppSettings.notificationsEnabled,
+            todoReminderIntervalMinutes: AppSettings.todoReminderIntervalMinutes,
+            todoReminderMessage: AppSettings.todoReminderMessage,
+            emptyDayReminderMessage: AppSettings.emptyDayReminderMessage,
             wellnessBreakEnabled: AppSettings.wellnessBreakRemindersEnabled,
-            wellnessBreakIntervalMinutes: AppSettings.wellnessBreakIntervalMinutes
+            wellnessBreakIntervalMinutes: AppSettings.wellnessBreakIntervalMinutes,
+            wellnessBreakMessage: AppSettings.wellnessBreakMessage,
+            wellnessBreakStartMinutes: AppSettings.wellnessBreakStartMinutes,
+            wellnessBreakEndMinutes: AppSettings.wellnessBreakEndMinutes,
+            ignoreWeekends: AppSettings.ignoreCarryForwardWeekends
         )
 
         if !force, state == lastScheduledNotificationState {
@@ -610,8 +621,15 @@ private struct NotificationState: Equatable {
     let totalTodos: Int
     let pendingTodos: Int
     let notificationsEnabled: Bool
+    let todoReminderIntervalMinutes: Int
+    let todoReminderMessage: String
+    let emptyDayReminderMessage: String
     let wellnessBreakEnabled: Bool
     let wellnessBreakIntervalMinutes: Int
+    let wellnessBreakMessage: String
+    let wellnessBreakStartMinutes: Int
+    let wellnessBreakEndMinutes: Int
+    let ignoreWeekends: Bool
 }
 
 private struct PlannerSnapshotDTO: Codable {

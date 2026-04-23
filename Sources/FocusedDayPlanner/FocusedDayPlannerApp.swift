@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     message: notification.request.content.body
                 )
             }
+            return [.banner, .list, .badge]
         }
 
         return [.banner, .list, .sound, .badge]

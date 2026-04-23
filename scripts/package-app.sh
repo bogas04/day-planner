@@ -55,6 +55,13 @@ mkdir -p "$APP_DIR/Contents/Resources"
 cp ".build/release/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 
+ICONSET_DIR="$DIST_DIR/AppIcon.iconset"
+ICNS_FILE="$APP_DIR/Contents/Resources/AppIcon.icns"
+rm -rf "$ICONSET_DIR"
+swift "$ROOT_DIR/scripts/generate-app-icon.swift" "$ICONSET_DIR"
+iconutil -c icns "$ICONSET_DIR" -o "$ICNS_FILE"
+rm -rf "$ICONSET_DIR"
+
 while IFS= read -r -d '' IMAGE_FILE; do
     cp "$IMAGE_FILE" "$APP_DIR/Contents/Resources/$(basename "$IMAGE_FILE")"
 done < <(find "$ROOT_DIR/assets" -type f -name 'image-*.png' -print0 2>/dev/null || true)
@@ -76,6 +83,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <string>$MARKETING_VERSION</string>
   <key>CFBundleExecutable</key>
   <string>$APP_NAME</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>

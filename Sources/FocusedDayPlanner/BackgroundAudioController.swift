@@ -23,11 +23,30 @@ struct SoundEffectDefinition: Identifiable, Equatable {
     let sourceLabel: String
 }
 
+struct SavedSoundMix: Identifiable, Codable, Equatable {
+    let slotNumber: Int
+    let name: String
+    var levels: [String: Double]
+    var updatedAt: Date?
+
+    var id: Int { slotNumber }
+
+    var isEmpty: Bool {
+        levels.values.allSatisfy { $0 <= 0.001 }
+    }
+}
+
+private struct SavedSoundMixSnapshot: Codable {
+    let exportedAt: Date
+    let mixes: [SavedSoundMix]
+}
+
 @MainActor
 final class BackgroundAudioController: NSObject, ObservableObject {
     @Published private(set) var localTracks: [AudioLibraryItem] = []
     @Published private(set) var soundEffects: [SoundEffectDefinition] = BackgroundAudioController.soundEffectsCatalog
     @Published private(set) var soundEffectLevels: [String: Double] = [:]
+    @Published private(set) var savedMixes: [SavedSoundMix] = []
     @Published private(set) var isPlaying = false
     @Published private(set) var isLoading = false
     @Published private(set) var masterVolume: Double
@@ -42,6 +61,7 @@ final class BackgroundAudioController: NSObject, ObservableObject {
     private var resolvedDownloadURLs: [String: URL] = [:]
 
     nonisolated static let supportedAudioExtensions: Set<String> = ["mp3", "m4a", "aac", "wav", "aiff", "aif"]
+    nonisolated static let maximumSavedMixCount = 5
 
     init(
         fileManager: FileManager = .default,
@@ -67,6 +87,10 @@ final class BackgroundAudioController: NSObject, ObservableObject {
         rootDirectoryURL.appendingPathComponent("Curated", isDirectory: true)
     }
 
+    var savedMixesFileURL: URL {
+        rootDirectoryURL.appendingPathComponent("SavedMixes.json", isDirectory: false)
+    }
+
     var activeEffects: [SoundEffectDefinition] {
         soundEffects.filter { mixLevel(for: $0.id) > 0.001 }
     }
@@ -75,9 +99,19 @@ final class BackgroundAudioController: NSObject, ObservableObject {
         activeEffects.count
     }
 
+    var canSaveNewMix: Bool {
+        savedMixes.count < Self.maximumSavedMixCount
+    }
+
+    var nextMixName: String? {
+        guard canSaveNewMix else { return nil }
+        return "mix\(savedMixes.count + 1)"
+    }
+
     func loadLibrary() {
         try? ensureDirectories()
         localTracks = Self.scanUserTracks(in: userLibraryDirectoryURL, fileManager: fileManager)
+        loadSavedMixes()
 
         for effect in soundEffects where soundEffectLevels[effect.id] == nil {
             soundEffectLevels[effect.id] = 0
@@ -142,6 +176,65 @@ final class BackgroundAudioController: NSObject, ObservableObject {
         guard isPlaying || !playersByID.isEmpty || !preparationTasks.isEmpty else { return }
         stopPlaybackPreservingMix()
         statusMessage = "Paused the current sound mix."
+    }
+
+    func saveCurrentMixAsNextSlot() {
+        loadLibraryIfNeeded()
+        guard canSaveNewMix else {
+            statusMessage = "You can save up to five mixes."
+            return
+        }
+
+        let levels = Dictionary(
+            uniqueKeysWithValues: soundEffects.map { ($0.id, mixLevel(for: $0.id)) }
+        )
+        let slotNumber = savedMixes.count + 1
+        let mix = SavedSoundMix(
+            slotNumber: slotNumber,
+            name: "mix\(slotNumber)",
+            levels: levels,
+            updatedAt: .now
+        )
+        savedMixes.append(mix)
+        persistSavedMixes()
+        statusMessage = "Saved the current mix as \(mix.name)."
+    }
+
+    func loadMix(from slotNumber: Int) {
+        loadLibraryIfNeeded()
+        guard let mix = savedMixes.first(where: { $0.slotNumber == slotNumber }) else { return }
+
+        soundEffectLevels = normalizedLevels(from: mix.levels)
+        syncPlaybackForCurrentMix()
+        statusMessage = "Loaded \(mix.name)."
+    }
+
+    func deleteMix(slotNumber: Int) {
+        loadLibraryIfNeeded()
+        savedMixes.removeAll { $0.slotNumber == slotNumber }
+        savedMixes = savedMixes
+            .sorted { $0.slotNumber < $1.slotNumber }
+            .enumerated()
+            .map { index, mix in
+                SavedSoundMix(
+                    slotNumber: index + 1,
+                    name: "mix\(index + 1)",
+                    levels: mix.levels,
+                    updatedAt: mix.updatedAt
+                )
+            }
+        persistSavedMixes()
+        statusMessage = "Deleted mix\(slotNumber)."
+    }
+
+    func exportSavedMixesJSON(to url: URL) throws {
+        loadLibraryIfNeeded()
+        let snapshot = SavedSoundMixSnapshot(exportedAt: .now, mixes: savedMixes)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(snapshot)
+        try data.write(to: url, options: .atomic)
     }
 
     private func stopPlaybackPreservingMix() {
@@ -298,6 +391,13 @@ final class BackgroundAudioController: NSObject, ObservableObject {
             sourceLabel: "Pixabay"
         ),
         SoundEffectDefinition(
+            id: "windchimes",
+            title: "Windchimes",
+            subtitle: "Gentle glassy and chime-like wind sounds.",
+            pageURL: URL(string: "https://pixabay.com/sound-effects/film-special-effects-various-glassy-stone-windchime-sounds-48417/")!,
+            sourceLabel: "Pixabay"
+        ),
+        SoundEffectDefinition(
             id: "restaurant-ambience",
             title: "Busy Restaurant",
             subtitle: "Dining room chatter and indoor restaurant energy.",
@@ -310,6 +410,49 @@ final class BackgroundAudioController: NSObject, ObservableObject {
         try fileManager.createDirectory(at: rootDirectoryURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: userLibraryDirectoryURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: curatedLibraryDirectoryURL, withIntermediateDirectories: true)
+    }
+
+    private func normalizedLevels(from rawLevels: [String: Double]) -> [String: Double] {
+        Dictionary(uniqueKeysWithValues: soundEffects.map { effect in
+            (effect.id, AppSettings.normalizeBackgroundAudioVolume(rawLevels[effect.id] ?? 0))
+        })
+    }
+
+    private func loadSavedMixes() {
+        guard fileManager.fileExists(atPath: savedMixesFileURL.path) else {
+            savedMixes = []
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: savedMixesFileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let snapshot = try decoder.decode(SavedSoundMixSnapshot.self, from: data)
+            savedMixes = snapshot.mixes
+                .filter { (1...Self.maximumSavedMixCount).contains($0.slotNumber) }
+                .sorted { $0.slotNumber < $1.slotNumber }
+                .map { mix in
+                var normalizedMix = mix
+                normalizedMix.levels = normalizedLevels(from: mix.levels)
+                return normalizedMix
+            }
+        } catch {
+            savedMixes = []
+        }
+    }
+
+    private func persistSavedMixes() {
+        do {
+            let snapshot = SavedSoundMixSnapshot(exportedAt: .now, mixes: savedMixes)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(snapshot)
+            try data.write(to: savedMixesFileURL, options: .atomic)
+        } catch {
+            statusMessage = "Unable to save mixes: \(error.localizedDescription)"
+        }
     }
 
     private func syncPlaybackForCurrentMix() {

@@ -2,7 +2,7 @@ import Foundation
 import UserNotifications
 
 @MainActor
-final class DailyReminderScheduler {
+final class DailyReminderScheduler: ObservableObject {
     struct DebugSnapshot {
         let lines: [String]
 
@@ -18,23 +18,40 @@ final class DailyReminderScheduler {
     private var didRequestAuthorization = false
     private var refreshTask: Task<Void, Never>?
     private var lastScheduledState: ReminderScheduleState?
+    @Published private(set) var lastNotificationStatus = "No notification action yet."
+    @Published private(set) var lastNotificationUpdatedAt: Date?
 
     private init() {}
 
     func refresh(totalTodos: Int, pendingTodos: Int, now: Date = .now) {
         guard Self.isSupportedEnvironment else { return }
         guard AppSettings.notificationsEnabled else {
-            WellnessBreakOverlayController.shared.configure(isEnabled: false, intervalMinutes: AppSettings.defaultWellnessBreakIntervalMinutes)
+            WellnessBreakOverlayController.shared.configure(
+                isEnabled: false,
+                intervalMinutes: AppSettings.defaultWellnessBreakIntervalMinutes,
+                message: AppSettings.wellnessBreakMessage,
+                workdayStartMinutes: AppSettings.wellnessBreakStartMinutes,
+                workdayEndMinutes: AppSettings.wellnessBreakEndMinutes,
+                skipWeekends: AppSettings.ignoreCarryForwardWeekends
+            )
             clearPendingNotifications()
             lastScheduledState = nil
+            updateNotificationStatus("Notifications disabled. Cleared pending requests.")
             return
         }
         let state = ReminderScheduleState(
             totalTodos: totalTodos,
             pendingTodos: pendingTodos,
             notificationsEnabled: AppSettings.notificationsEnabled,
+            todoReminderIntervalMinutes: AppSettings.todoReminderIntervalMinutes,
+            todoReminderMessage: AppSettings.todoReminderMessage,
+            emptyDayReminderMessage: AppSettings.emptyDayReminderMessage,
             wellnessBreakEnabled: AppSettings.wellnessBreakRemindersEnabled,
-            wellnessBreakIntervalMinutes: AppSettings.wellnessBreakIntervalMinutes
+            wellnessBreakIntervalMinutes: AppSettings.wellnessBreakIntervalMinutes,
+            wellnessBreakMessage: AppSettings.wellnessBreakMessage,
+            wellnessBreakStartMinutes: AppSettings.wellnessBreakStartMinutes,
+            wellnessBreakEndMinutes: AppSettings.wellnessBreakEndMinutes,
+            ignoreWeekends: AppSettings.ignoreCarryForwardWeekends
         )
         if state == lastScheduledState {
             return
@@ -43,7 +60,11 @@ final class DailyReminderScheduler {
 
         WellnessBreakOverlayController.shared.configure(
             isEnabled: AppSettings.wellnessBreakRemindersEnabled,
-            intervalMinutes: AppSettings.wellnessBreakIntervalMinutes
+            intervalMinutes: AppSettings.wellnessBreakIntervalMinutes,
+            message: AppSettings.wellnessBreakMessage,
+            workdayStartMinutes: AppSettings.wellnessBreakStartMinutes,
+            workdayEndMinutes: AppSettings.wellnessBreakEndMinutes,
+            skipWeekends: AppSettings.ignoreCarryForwardWeekends
         )
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
@@ -61,6 +82,7 @@ final class DailyReminderScheduler {
     func clearPendingNotifications() {
         guard let center = notificationCenter() else { return }
         center.removePendingNotificationRequests(withIdentifiers: allNotificationIdentifiers)
+        updateNotificationStatus("Cleared pending notifications.")
     }
 
     func sendTestNotification() async -> DebugSnapshot {
@@ -77,6 +99,7 @@ final class DailyReminderScheduler {
 
         guard beforeSettings.authorizationStatus == .authorized || beforeSettings.authorizationStatus == .provisional else {
             lines.append("Schedule result: skipped because notification permission is not granted.")
+            updateNotificationStatus("Skipped test notification because permission is not granted.")
             return DebugSnapshot(lines: lines)
         }
 
@@ -86,6 +109,7 @@ final class DailyReminderScheduler {
             body: "This is a test reminder from Focused Day Planner."
         )
         lines.append("Schedule result: \(scheduled ? "queued test notification for ~1 second from now." : "failed to queue test notification.")")
+        updateNotificationStatus(scheduled ? "Queued a test notification." : "Failed to queue a test notification.")
         await MainActor.run {
             WellnessBreakOverlayController.shared.show(
                 title: "Test reminder",
@@ -138,19 +162,15 @@ final class DailyReminderScheduler {
         center.removePendingNotificationRequests(withIdentifiers: allNotificationIdentifiers)
 
         if AppSettings.wellnessBreakRemindersEnabled {
-            await addRepeatingNotification(
-                id: wellnessNotificationIdentifier,
-                timeInterval: TimeInterval(AppSettings.wellnessBreakIntervalMinutes * 60),
-                body: "Time to stand up, stretch, or rest your eyes."
-            )
+            await addWellnessNotifications(now: now)
         }
 
         if totalTodos == 0 {
-            if let date = nextDate(hour: 11, now: now) {
+            if let date = nextDate(minutesSinceMidnight: 11 * 60, now: now) {
                 _ = await addNotification(
                     id: "focuseddayplanner.empty.11",
                     date: date,
-                    body: "What would you like to work on today?"
+                    body: AppSettings.emptyDayReminderMessage
                 )
             }
             return
@@ -158,13 +178,23 @@ final class DailyReminderScheduler {
 
         guard pendingTodos > 0 else { return }
 
-        for hour in 11...17 {
-            guard let date = nextDate(hour: hour, now: now) else { continue }
+        let intervalMinutes = AppSettings.normalizeTodoReminderIntervalMinutes(AppSettings.todoReminderIntervalMinutes)
+        let reminderBody = AppSettings
+            .normalizeTodoReminderMessage(AppSettings.todoReminderMessage)
+            .replacingOccurrences(of: "{count}", with: "\(pendingTodos)")
+
+        var reminderMinute = 11 * 60
+        while reminderMinute <= 17 * 60 {
+            guard let date = nextDate(minutesSinceMidnight: reminderMinute, now: now) else {
+                reminderMinute += intervalMinutes
+                continue
+            }
             _ = await addNotification(
-                id: "focuseddayplanner.pending.\(hour)",
+                id: "focuseddayplanner.pending.\(reminderMinute)",
                 date: date,
-                body: "You have \(pendingTodos) todos left, let's do it!"
+                body: reminderBody
             )
+            reminderMinute += intervalMinutes
         }
     }
 
@@ -200,6 +230,62 @@ final class DailyReminderScheduler {
         }
     }
 
+    private func addWellnessNotifications(now: Date) async {
+        let calendar = Calendar.current
+        let sanitizedHours = AppSettings.sanitizeWellnessWorkHours(
+            startMinutes: AppSettings.wellnessBreakStartMinutes,
+            endMinutes: AppSettings.wellnessBreakEndMinutes
+        )
+        let intervalMinutes = max(AppSettings.wellnessBreakIntervalMinutes, 1)
+        var scheduledCount = 0
+
+        for dayOffset in 0..<7 {
+            guard let dayDate = calendar.date(byAdding: .day, value: dayOffset, to: now) else { continue }
+            if AppSettings.ignoreCarryForwardWeekends && calendar.isDateInWeekend(dayDate) {
+                continue
+            }
+
+            var currentMinutes = sanitizedHours.startMinutes + intervalMinutes
+            while currentMinutes < sanitizedHours.endMinutes {
+                guard let candidateDate = date(
+                    at: currentMinutes,
+                    on: dayDate,
+                    calendar: calendar
+                ) else {
+                    currentMinutes += intervalMinutes
+                    continue
+                }
+
+                if candidateDate > now {
+                    let didSchedule = await addNotification(
+                        id: wellnessNotificationIdentifier(for: candidateDate),
+                        date: candidateDate,
+                        body: AppSettings.wellnessBreakMessage
+                    )
+                    if didSchedule {
+                        scheduledCount += 1
+                    }
+                }
+
+                currentMinutes += intervalMinutes
+            }
+        }
+
+        if scheduledCount > 0 {
+            updateNotificationStatus("Queued \(scheduledCount) wellness reminder(s) within work hours.")
+        } else {
+            updateNotificationStatus("No wellness reminders were queued in the current work window.")
+        }
+    }
+
+    private func date(at minutesSinceMidnight: Int, on date: Date, calendar: Calendar) -> Date? {
+        var components = calendar.dateComponents([.year, .month, .day], from: date)
+        components.hour = minutesSinceMidnight / 60
+        components.minute = minutesSinceMidnight % 60
+        components.second = 0
+        return calendar.date(from: components)
+    }
+
     private func addRepeatingNotification(id: String, timeInterval: TimeInterval, body: String) async {
         guard let center = notificationCenter() else { return }
         guard timeInterval >= 60 else { return }
@@ -219,11 +305,11 @@ final class DailyReminderScheduler {
         }
     }
 
-    private func nextDate(hour: Int, now: Date) -> Date? {
+    private func nextDate(minutesSinceMidnight: Int, now: Date) -> Date? {
         let calendar = Calendar.current
         var components = calendar.dateComponents([.year, .month, .day], from: now)
-        components.hour = hour
-        components.minute = 0
+        components.hour = minutesSinceMidnight / 60
+        components.minute = minutesSinceMidnight % 60
         components.second = 0
 
         guard let candidate = calendar.date(from: components) else { return nil }
@@ -231,11 +317,40 @@ final class DailyReminderScheduler {
     }
 
     private var allNotificationIdentifiers: [String] {
-        [testNotificationIdentifier, wellnessNotificationIdentifier, "focuseddayplanner.empty.11"] + (11...17).map { "focuseddayplanner.pending.\($0)" }
+        let calendar = Calendar.current
+        let now = Date()
+        let wellnessIdentifiers = (0..<7).flatMap { dayOffset -> [String] in
+            guard let dayDate = calendar.date(byAdding: .day, value: dayOffset, to: now) else { return [] }
+            let sanitizedHours = AppSettings.sanitizeWellnessWorkHours(
+                startMinutes: AppSettings.wellnessBreakStartMinutes,
+                endMinutes: AppSettings.wellnessBreakEndMinutes
+            )
+            let intervalMinutes = max(AppSettings.wellnessBreakIntervalMinutes, 1)
+            var identifiers: [String] = []
+            var currentMinutes = sanitizedHours.startMinutes + intervalMinutes
+            while currentMinutes < sanitizedHours.endMinutes {
+                if let candidateDate = date(at: currentMinutes, on: dayDate, calendar: calendar) {
+                    identifiers.append(wellnessNotificationIdentifier(for: candidateDate))
+                }
+                currentMinutes += intervalMinutes
+            }
+            return identifiers
+        }
+
+        let todoIntervalMinutes = AppSettings.normalizeTodoReminderIntervalMinutes(AppSettings.todoReminderIntervalMinutes)
+        let todoIdentifiers = stride(from: 11 * 60, through: 17 * 60, by: todoIntervalMinutes)
+            .map { "focuseddayplanner.pending.\($0)" }
+
+        return [testNotificationIdentifier, "focuseddayplanner.empty.11"] +
+            todoIdentifiers +
+            wellnessIdentifiers
     }
 
-    private var wellnessNotificationIdentifier: String {
-        Self.wellnessNotificationIdentifierValue
+    private func wellnessNotificationIdentifier(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar.current
+        formatter.dateFormat = "yyyyMMddHHmm"
+        return "\(Self.wellnessNotificationIdentifierValue).\(formatter.string(from: date))"
     }
 
     private var testNotificationIdentifier: String {
@@ -298,12 +413,24 @@ final class DailyReminderScheduler {
             return "unknown"
         }
     }
+
+    private func updateNotificationStatus(_ status: String) {
+        lastNotificationStatus = status
+        lastNotificationUpdatedAt = .now
+    }
 }
 
 private struct ReminderScheduleState: Equatable {
     let totalTodos: Int
     let pendingTodos: Int
     let notificationsEnabled: Bool
+    let todoReminderIntervalMinutes: Int
+    let todoReminderMessage: String
+    let emptyDayReminderMessage: String
     let wellnessBreakEnabled: Bool
     let wellnessBreakIntervalMinutes: Int
+    let wellnessBreakMessage: String
+    let wellnessBreakStartMinutes: Int
+    let wellnessBreakEndMinutes: Int
+    let ignoreWeekends: Bool
 }

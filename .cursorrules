@@ -1,0 +1,9 @@
+See `AGENTS.md` at the repository root for the main project guidance.
+
+Key expectations for this repo:
+
+- Keep business logic out of `PlannerRootView.swift` when possible.
+- Route persisted settings through `AppSettings.swift`.
+- Route planner mutations through `PlannerStore.swift`.
+- Add or update tests when changing planner rules, carry-forward behavior, import/export, or audio-library logic.
+- Run `swift test` before wrapping up when practical.

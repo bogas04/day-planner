@@ -7,6 +7,27 @@ import Testing
 struct PlannerStoreCarryForwardTests {
     @Test
     @MainActor
+    func addTodoInsertsNewItemsAtTopOfDayView() throws {
+        let calendar = makeUTCCalendar()
+        let container = try makeInMemoryContainer()
+        let store = PlannerStore(context: container.mainContext, calendar: calendar)
+
+        let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 3, day: 3)))
+        let key = store.dateKey(for: now)
+
+        store.ensureDayPlan(for: key, now: now)
+        let plan = try #require(store.fetchDayPlan(for: key))
+
+        store.addTodo(title: "First task", to: plan, now: now)
+        store.addTodo(title: "Second task", to: plan, now: now)
+
+        let todos = store.sortedTodos(for: plan)
+        #expect(todos.map(\.title) == ["Second task", "First task"])
+        #expect(todos.map(\.sortOrder) == [0, 1])
+    }
+
+    @Test
+    @MainActor
     func carryPendingTodosDoesNotDuplicateWhenDestinationIsCreatedToday() throws {
         let calendar = makeUTCCalendar()
         let container = try makeInMemoryContainer()

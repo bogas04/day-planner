@@ -13,15 +13,77 @@ private enum DetailMode {
     case settings
 }
 
+private enum WellnessBreakTimeEdge {
+    case start
+    case end
+}
+
+private enum StatsTimeframe: String, CaseIterable, Identifiable {
+    case weekly
+    case monthly
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .weekly:
+            return "Weekly"
+        case .monthly:
+            return "Monthly"
+        }
+    }
+
+    var singularLabel: String {
+        switch self {
+        case .weekly:
+            return "week"
+        case .monthly:
+            return "month"
+        }
+    }
+
+    var pluralLabel: String {
+        switch self {
+        case .weekly:
+            return "weeks"
+        case .monthly:
+            return "months"
+        }
+    }
+
+    var calendarComponent: Calendar.Component {
+        switch self {
+        case .weekly:
+            return .weekOfYear
+        case .monthly:
+            return .month
+        }
+    }
+}
+
 struct PlannerRootView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var uiScaleController: UIScaleController
     @EnvironmentObject private var backgroundAudioController: BackgroundAudioController
+    @StateObject private var wellnessBreakOverlayController = WellnessBreakOverlayController.shared
+    @StateObject private var reminderScheduler = DailyReminderScheduler.shared
     @Query(sort: \DayPlan.dateKey, order: .reverse) private var dayPlans: [DayPlan]
     @AppStorage(AppSettings.notificationsEnabledKey) private var notificationsEnabled = true
+    @AppStorage(AppSettings.todoReminderIntervalMinutesKey)
+    private var todoReminderIntervalMinutes = AppSettings.defaultTodoReminderIntervalMinutes
+    @AppStorage(AppSettings.todoReminderMessageKey)
+    private var todoReminderMessage = AppSettings.defaultTodoReminderMessage
+    @AppStorage(AppSettings.emptyDayReminderMessageKey)
+    private var emptyDayReminderMessage = AppSettings.defaultEmptyDayReminderMessage
     @AppStorage(AppSettings.wellnessBreakRemindersEnabledKey) private var wellnessBreakRemindersEnabled = false
     @AppStorage(AppSettings.wellnessBreakIntervalMinutesKey)
     private var wellnessBreakIntervalMinutes = AppSettings.defaultWellnessBreakIntervalMinutes
+    @AppStorage(AppSettings.wellnessBreakMessageKey)
+    private var wellnessBreakMessage = AppSettings.defaultWellnessBreakMessage
+    @AppStorage(AppSettings.wellnessBreakStartMinutesKey)
+    private var wellnessBreakStartMinutes = AppSettings.defaultWellnessBreakStartMinutes
+    @AppStorage(AppSettings.wellnessBreakEndMinutesKey)
+    private var wellnessBreakEndMinutes = AppSettings.defaultWellnessBreakEndMinutes
     @AppStorage(AppSettings.skipCarryForwardConfirmKey) private var skipCarryForwardConfirm = false
     @AppStorage(AppSettings.ignoreCarryForwardWeekendsKey) private var ignoreCarryForwardWeekends = true
     @AppStorage(AppSettings.themeTintRedKey) private var themeTintRed = 0.86
@@ -30,6 +92,7 @@ struct PlannerRootView: View {
     @AppStorage(AppSettings.themeTintOpacityKey) private var themeTintOpacity = 0.10
     @AppStorage(AppSettings.backgroundAudioEnabledKey) private var backgroundAudioEnabled = true
     @AppStorage(AppSettings.backgroundAudioAutoResumeKey) private var backgroundAudioAutoResume = false
+    @AppStorage(AppSettings.developerModeEnabledKey) private var developerModeEnabled = false
 
     @State private var selectedDateKey: String?
     @State private var detailMode: DetailMode = .day
@@ -69,8 +132,11 @@ struct PlannerRootView: View {
 
     @State private var calendarMonth: Date = Date()
     @State private var journalPage = 0
+    @State private var statsTimeframe: StatsTimeframe = .weekly
     @State private var weeklyRatingsOffset = 0
+    @State private var monthlyRatingsOffset = 0
     @State private var journalDateRange: DateInterval?
+    @State private var pendingDeleteMixSlotNumber: Int?
 
     private let historyLimit = 10
     private let journalPageSize = 10
@@ -89,6 +155,11 @@ struct PlannerRootView: View {
     private static let shortDayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d"
+        return formatter
+    }()
+    private static let shortMonthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "LLL yyyy"
         return formatter
     }()
     private let reflectionPrompts = [
@@ -221,29 +292,6 @@ struct PlannerRootView: View {
         .dynamicTypeSize(uiScaleController.dynamicTypeSize)
         .controlSize(uiScaleController.controlSize)
         .navigationTitle(currentTitle)
-        .toolbar {
-            ToolbarItemGroup(placement: .automatic) {
-                backgroundAudioMiniBar
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    selectedDateKey = store.createNextDay(after: selectedDateKey)
-                    detailMode = .day
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("Create next day")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button(role: .destructive) {
-                    showingDeleteDayConfirmation = true
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .disabled(detailMode != .day || selectedPlan == nil)
-                .help("Delete selected day")
-            }
-        }
         .alert("Unable to change date", isPresented: Binding(
             get: { dateChangeError != nil },
             set: { if !$0 { dateChangeError = nil } }
@@ -259,6 +307,26 @@ struct PlannerRootView: View {
             Button("OK", role: .cancel) { dataTransferMessage = nil }
         } message: {
             Text(dataTransferMessage ?? "")
+        }
+        .confirmationDialog(
+            "Delete this saved mix?",
+            isPresented: Binding(
+                get: { pendingDeleteMixSlotNumber != nil },
+                set: { if !$0 { pendingDeleteMixSlotNumber = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Mix", role: .destructive) {
+                if let slotNumber = pendingDeleteMixSlotNumber {
+                    backgroundAudioController.deleteMix(slotNumber: slotNumber)
+                }
+                pendingDeleteMixSlotNumber = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeleteMixSlotNumber = nil
+            }
+        } message: {
+            Text("This saved mix will be removed permanently.")
         }
         .confirmationDialog(
             "Delete this day?",
@@ -340,30 +408,7 @@ struct PlannerRootView: View {
             .frame(width: 420)
         }
         .onAppear {
-            calendarMonth = monthStart(for: .now)
-            reflectionPlaceholderIndex = (reflectionPlaceholderIndex + 1) % reflectionPrompts.count
-            if selectedDateKey == nil {
-                if dayPlans.contains(where: { $0.dateKey == todayKey }) {
-                    selectedDateKey = todayKey
-                } else {
-                    selectedDateKey = dayPlans.first?.dateKey
-                }
-            }
-            if let key = selectedDateKey {
-                if let date = store.date(from: key) {
-                    calendarMonth = monthStart(for: date)
-                }
-            }
-            reloadDecorativeImageCandidatesIfNeeded()
-            refreshDecorativeImagePresentation()
-            store.refreshTodayNotifications()
-            if !backgroundAudioEnabled {
-                backgroundAudioController.pause()
-            } else if backgroundAudioAutoResume || backgroundAudioController.activeSoundCount > 0 {
-                backgroundAudioController.loadLibraryIfNeeded()
-            } else {
-                backgroundAudioController.loadLibraryIfNeeded()
-            }
+            handleViewAppear()
         }
         .onChange(of: selectedDateKey) { _, _ in
             decorativeImageCycleOffset = 0
@@ -373,10 +418,86 @@ struct PlannerRootView: View {
         .onChange(of: decorativeImageCycleOffset) { _, _ in
             refreshDecorativeImagePresentation()
         }
+        .onChange(of: notificationsEnabled) { _, _ in
+            refreshWellnessBreakOverlaySchedule()
+        }
+        .onChange(of: wellnessBreakRemindersEnabled) { _, _ in
+            refreshWellnessBreakOverlaySchedule()
+        }
+        .onChange(of: todoReminderIntervalMinutes) { _, _ in
+            if notificationsEnabled {
+                store.refreshTodayNotifications()
+            }
+        }
+        .onChange(of: todoReminderMessage) { _, _ in
+            if notificationsEnabled {
+                store.refreshTodayNotifications()
+            }
+        }
+        .onChange(of: emptyDayReminderMessage) { _, _ in
+            if notificationsEnabled {
+                store.refreshTodayNotifications()
+            }
+        }
+        .onChange(of: wellnessBreakIntervalMinutes) { _, _ in
+            refreshWellnessBreakOverlaySchedule()
+        }
+        .onChange(of: wellnessBreakMessage) { _, _ in
+            refreshWellnessBreakOverlaySchedule()
+            if notificationsEnabled && wellnessBreakRemindersEnabled {
+                store.refreshTodayNotifications()
+            }
+        }
+        .onChange(of: wellnessBreakStartMinutes) { _, _ in
+            let sanitized = AppSettings.sanitizeWellnessWorkHours(
+                startMinutes: wellnessBreakStartMinutes,
+                endMinutes: wellnessBreakEndMinutes
+            )
+            wellnessBreakStartMinutes = sanitized.startMinutes
+            wellnessBreakEndMinutes = sanitized.endMinutes
+            refreshWellnessBreakOverlaySchedule()
+            if notificationsEnabled && wellnessBreakRemindersEnabled {
+                store.refreshTodayNotifications()
+            }
+        }
+        .onChange(of: wellnessBreakEndMinutes) { _, _ in
+            let sanitized = AppSettings.sanitizeWellnessWorkHours(
+                startMinutes: wellnessBreakStartMinutes,
+                endMinutes: wellnessBreakEndMinutes
+            )
+            wellnessBreakStartMinutes = sanitized.startMinutes
+            wellnessBreakEndMinutes = sanitized.endMinutes
+            refreshWellnessBreakOverlaySchedule()
+            if notificationsEnabled && wellnessBreakRemindersEnabled {
+                store.refreshTodayNotifications()
+            }
+        }
+        .onChange(of: ignoreCarryForwardWeekends) { _, _ in
+            refreshWellnessBreakOverlaySchedule()
+            if notificationsEnabled && wellnessBreakRemindersEnabled {
+                store.refreshTodayNotifications()
+            }
+        }
         .onChange(of: dayPlans.count) { _, _ in
             clampJournalPage()
             clampWeeklyRatingsOffset()
+            clampMonthlyRatingsOffset()
         }
+    }
+
+    private func refreshWellnessBreakOverlaySchedule() {
+        let sanitizedHours = AppSettings.sanitizeWellnessWorkHours(
+            startMinutes: wellnessBreakStartMinutes,
+            endMinutes: wellnessBreakEndMinutes
+        )
+        WellnessBreakOverlayController.shared.configure(
+            isEnabled: notificationsEnabled && wellnessBreakRemindersEnabled,
+            intervalMinutes: AppSettings.normalizeWellnessBreakIntervalMinutes(wellnessBreakIntervalMinutes),
+            message: AppSettings.normalizeWellnessBreakMessage(wellnessBreakMessage),
+            workdayStartMinutes: sanitizedHours.startMinutes,
+            workdayEndMinutes: sanitizedHours.endMinutes,
+            skipWeekends: ignoreCarryForwardWeekends
+        )
     }
 
     private func loadDecorativeImageCandidateURLs() -> [URL] {
@@ -464,6 +585,34 @@ struct PlannerRootView: View {
         let end = lowercased.index(lowercased.endIndex, offsetBy: -".png".count)
         let rawNumber = lowercased[start..<end]
         return Int(rawNumber)
+    }
+
+    private func handleViewAppear() {
+        calendarMonth = monthStart(for: .now)
+        reflectionPlaceholderIndex = (reflectionPlaceholderIndex + 1) % reflectionPrompts.count
+
+        let resolvedTodayKey = todayKey
+        let dayPlanKeys = dayPlans.map(\.dateKey)
+        let hasTodayPlan = dayPlanKeys.contains(resolvedTodayKey)
+
+        if selectedDateKey == nil {
+            selectedDateKey = hasTodayPlan ? resolvedTodayKey : dayPlans.first?.dateKey
+        }
+
+        if let key = selectedDateKey, let date = store.date(from: key) {
+            calendarMonth = monthStart(for: date)
+        }
+
+        reloadDecorativeImageCandidatesIfNeeded()
+        refreshDecorativeImagePresentation()
+        refreshWellnessBreakOverlaySchedule()
+        store.refreshTodayNotifications()
+
+        if !backgroundAudioEnabled {
+            backgroundAudioController.pause()
+        } else {
+            backgroundAudioController.loadLibraryIfNeeded()
+        }
     }
 
     private func refreshDecorativeImagePresentation() {
@@ -862,28 +1011,21 @@ struct PlannerRootView: View {
                             isOn: $skipCarryForwardConfirm
                         )
 
-                        settingsDivider()
-
-                        settingsValueRow(
-                            title: "Version",
-                            description: "Current app version and build number.",
-                            value: appVersionDisplay
-                        )
                     }
                 }
 
                 sectionCard {
                     VStack(alignment: .leading, spacing: 0) {
                         settingsSectionHeader(
-                            title: "Notifications",
-                            description: "Todo reminders and wellness-break nudges."
+                            title: "Planner Notifications",
+                            description: "Todo-focused reminders in macOS Notification Center."
                         )
 
                         settingsDivider()
 
                         settingsToggleRow(
-                            title: "Todo Notifications",
-                            description: "Hourly reminders when there are unfinished tasks.",
+                            title: "Todo Reminders",
+                            description: "Planner nudges for unfinished todos and empty days.",
                             isOn: Binding(
                                 get: { notificationsEnabled },
                                 set: { newValue in
@@ -895,6 +1037,147 @@ struct PlannerRootView: View {
                                     }
                                 }
                             )
+                        )
+
+                        settingsDivider()
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            settingsControlRow(
+                                title: "Reminder Interval",
+                                description: "Choose how often unfinished todos should nudge you between 11:00 and 17:00."
+                            ) {
+                                Stepper(
+                                    value: Binding(
+                                        get: {
+                                            AppSettings.normalizeTodoReminderIntervalMinutes(todoReminderIntervalMinutes)
+                                        },
+                                        set: { newValue in
+                                            todoReminderIntervalMinutes = AppSettings.normalizeTodoReminderIntervalMinutes(newValue)
+                                            if notificationsEnabled {
+                                                store.refreshTodayNotifications()
+                                            }
+                                        }
+                                    ),
+                                    in: AppSettings.minimumTodoReminderIntervalMinutes...AppSettings.maximumTodoReminderIntervalMinutes,
+                                    step: AppSettings.todoReminderIntervalStepMinutes
+                                ) {
+                                    Text("\(AppSettings.normalizeTodoReminderIntervalMinutes(todoReminderIntervalMinutes)) min")
+                                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                        .monospacedDigit()
+                                        .frame(minWidth: 88, alignment: .trailing)
+                                }
+                            }
+                            .disabled(!notificationsEnabled)
+
+                            settingsControlRow(
+                                title: "Pending Todo Message",
+                                description: "Use `{count}` anywhere to show the number of unfinished todos."
+                            ) {
+                                TextField(
+                                    "You still have {count} todo(s) left. Pick one and keep going.",
+                                    text: Binding(
+                                        get: { AppSettings.normalizeTodoReminderMessage(todoReminderMessage) },
+                                        set: { todoReminderMessage = $0 }
+                                    ),
+                                    axis: .vertical
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .lineLimit(2...4)
+                                .frame(width: 320)
+                            }
+                            .disabled(!notificationsEnabled)
+
+                            settingsControlRow(
+                                title: "Empty Day Message",
+                                description: "Shown when today has no todos yet."
+                            ) {
+                                TextField(
+                                    "What would you like to work on today?",
+                                    text: Binding(
+                                        get: { AppSettings.normalizeEmptyDayReminderMessage(emptyDayReminderMessage) },
+                                        set: { emptyDayReminderMessage = $0 }
+                                    ),
+                                    axis: .vertical
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .lineLimit(2...4)
+                                .frame(width: 320)
+                            }
+                            .disabled(!notificationsEnabled)
+                        }
+                        .padding(.top, 18)
+                        .padding(.bottom, 18)
+                        .padding(.horizontal, 18)
+
+                        if developerModeEnabled {
+                            settingsDivider()
+
+                            settingsControlRow(
+                                title: "Test Delivery",
+                                description: isCheckingNotificationStatus
+                                    ? "Checking current notification state..."
+                                    : "Test a reminder and inspect the macOS permission state."
+                            ) {
+                                HStack(spacing: 10) {
+                                    Button("Remind Now") {
+                                        isCheckingNotificationStatus = true
+                                        notificationDebugMessage = "Checking notification permission and scheduling a test reminder..."
+                                        Task {
+                                            let snapshot = await DailyReminderScheduler.shared.sendTestNotification()
+                                            await MainActor.run {
+                                                notificationDebugMessage = snapshot.summary
+                                                isCheckingNotificationStatus = false
+                                            }
+                                        }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(!notificationsEnabled || isCheckingNotificationStatus)
+
+                                    Button("Check Permission") {
+                                        isCheckingNotificationStatus = true
+                                        notificationDebugMessage = "Reading current notification settings..."
+                                        Task {
+                                            let snapshot = await DailyReminderScheduler.shared.permissionDebugSnapshot()
+                                            await MainActor.run {
+                                                notificationDebugMessage = snapshot.summary
+                                                isCheckingNotificationStatus = false
+                                            }
+                                        }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(isCheckingNotificationStatus)
+                                }
+                            }
+
+                            Text(notificationDebugMessage)
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .padding(.horizontal, 18)
+                                .padding(.bottom, 18)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+                                )
+                                .padding(.horizontal, 18)
+                                .padding(.top, 18)
+
+                            settingsDivider()
+
+                            wellnessDiagnosticsPanel
+                        }
+                    }
+                }
+
+                sectionCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        settingsSectionHeader(
+                            title: "Wellness Breaks",
+                            description: "Fullscreen break overlays and optional break reminders."
                         )
 
                         settingsDivider()
@@ -941,64 +1224,61 @@ struct PlannerRootView: View {
                                 }
                             }
                             .disabled(!notificationsEnabled || !wellnessBreakRemindersEnabled)
+
+                            settingsControlRow(
+                                title: "Work Hours",
+                                description: ignoreCarryForwardWeekends
+                                    ? "Wellness reminders run only during this window on weekdays."
+                                    : "Wellness reminders run only during this window each day."
+                            ) {
+                                HStack(spacing: 12) {
+                                    DatePicker(
+                                        "Start",
+                                        selection: wellnessBreakTimeBinding(for: .start),
+                                        displayedComponents: .hourAndMinute
+                                    )
+                                    .labelsHidden()
+                                    .datePickerStyle(.field)
+                                    .frame(width: 110)
+
+                                    Text("to")
+                                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+
+                                    DatePicker(
+                                        "End",
+                                        selection: wellnessBreakTimeBinding(for: .end),
+                                        displayedComponents: .hourAndMinute
+                                    )
+                                    .labelsHidden()
+                                    .datePickerStyle(.field)
+                                    .frame(width: 110)
+                                }
+                            }
+                            .disabled(!notificationsEnabled || !wellnessBreakRemindersEnabled)
+
+                            settingsControlRow(
+                                title: "Reminder Message",
+                                description: "Write the prompt you want to see during each wellness break."
+                            ) {
+                                TextField(
+                                    "Remind me to stretch my neck and look far away",
+                                    text: Binding(
+                                        get: { AppSettings.normalizeWellnessBreakMessage(wellnessBreakMessage) },
+                                        set: { wellnessBreakMessage = $0 }
+                                    ),
+                                    axis: .vertical
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .lineLimit(2...4)
+                                .frame(width: 320)
+                            }
+                            .disabled(!notificationsEnabled || !wellnessBreakRemindersEnabled)
                         }
                         .padding(.top, 18)
                         .padding(.bottom, 18)
                         .padding(.horizontal, 18)
-
-                        settingsDivider()
-
-                        settingsControlRow(
-                            title: "Test Delivery",
-                            description: isCheckingNotificationStatus
-                                ? "Checking current notification state..."
-                                : "Test a reminder and inspect the macOS permission state."
-                        ) {
-                            HStack(spacing: 10) {
-                                Button("Remind Now") {
-                                    isCheckingNotificationStatus = true
-                                    notificationDebugMessage = "Checking notification permission and scheduling a test reminder..."
-                                    Task {
-                                        let snapshot = await DailyReminderScheduler.shared.sendTestNotification()
-                                        await MainActor.run {
-                                            notificationDebugMessage = snapshot.summary
-                                            isCheckingNotificationStatus = false
-                                        }
-                                    }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(!notificationsEnabled || isCheckingNotificationStatus)
-
-                                Button("Check Permission") {
-                                    isCheckingNotificationStatus = true
-                                    notificationDebugMessage = "Reading current notification settings..."
-                                    Task {
-                                        let snapshot = await DailyReminderScheduler.shared.permissionDebugSnapshot()
-                                        await MainActor.run {
-                                            notificationDebugMessage = snapshot.summary
-                                            isCheckingNotificationStatus = false
-                                        }
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(isCheckingNotificationStatus)
-                            }
-                        }
-
-                        Text(notificationDebugMessage)
-                            .font(.system(.footnote, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                            .padding(.horizontal, 18)
-                            .padding(.bottom, 18)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
-                            )
-                            .padding(.horizontal, 18)
-                            .padding(.top, 18)
                     }
                 }
 
@@ -1183,6 +1463,18 @@ struct PlannerRootView: View {
                         settingsDivider()
 
                         settingsControlRow(
+                            title: "Saved Mixes JSON",
+                            description: "Export your five saved mix slots as a portable JSON file."
+                        ) {
+                            Button("Export Saved Mixes") {
+                                exportSavedMixesJSON()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        settingsDivider()
+
+                        settingsControlRow(
                             title: "Open Mixer",
                             description: "Go to the dedicated sidebar page for tiles, balancing, and live playback."
                         ) {
@@ -1192,22 +1484,24 @@ struct PlannerRootView: View {
                             .buttonStyle(.borderedProminent)
                         }
 
-                        settingsDivider()
+                        if developerModeEnabled {
+                            settingsDivider()
 
-                        Text(backgroundAudioController.statusMessage)
-                            .font(.system(.footnote, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                            .padding(.horizontal, 18)
-                            .padding(.bottom, 18)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
-                            )
-                            .padding(.horizontal, 18)
-                            .padding(.top, 18)
+                            Text(backgroundAudioController.statusMessage)
+                                .font(.system(.footnote, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .padding(.horizontal, 18)
+                                .padding(.bottom, 18)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
+                                )
+                                .padding(.horizontal, 18)
+                                .padding(.top, 18)
+                        }
                     }
                 }
 
@@ -1215,7 +1509,23 @@ struct PlannerRootView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         settingsSectionHeader(
                             title: "About",
-                            description: "Quick links related to the app and its author."
+                            description: "Version info, developer tools, and quick links."
+                        )
+
+                        settingsDivider()
+
+                        settingsValueRow(
+                            title: "Version",
+                            description: "Current app version and build number.",
+                            value: appVersionDisplay
+                        )
+
+                        settingsDivider()
+
+                        settingsToggleRow(
+                            title: "Developer Mode",
+                            description: "Show logs, diagnostics, and internal debugging tools in Settings.",
+                            isOn: $developerModeEnabled
                         )
 
                         settingsDivider()
@@ -1272,22 +1582,24 @@ struct PlannerRootView: View {
                             }
                         }
 
-                        settingsDivider()
+                        if developerModeEnabled {
+                            settingsDivider()
 
-                        settingsControlRow(
-                            title: "Logs",
-                            description: "Open Console or export recent unified logs for Focused Day Planner."
-                        ) {
-                            HStack(spacing: 10) {
-                                Button("Open Console") {
-                                    AppLogAccess.openConsoleApp()
-                                }
-                                .buttonStyle(.bordered)
+                            settingsControlRow(
+                                title: "Logs",
+                                description: "Open Console or export recent unified logs for Focused Day Planner."
+                            ) {
+                                HStack(spacing: 10) {
+                                    Button("Open Console") {
+                                        AppLogAccess.openConsoleApp()
+                                    }
+                                    .buttonStyle(.bordered)
 
-                                Button("Export Recent Logs") {
-                                    exportRecentLogs()
+                                    Button("Export Recent Logs") {
+                                        exportRecentLogs()
+                                    }
+                                    .buttonStyle(.bordered)
                                 }
-                                .buttonStyle(.bordered)
                             }
                         }
 
@@ -1407,6 +1719,111 @@ struct PlannerRootView: View {
         .padding(.vertical, 16)
     }
 
+    private func wellnessBreakTimeBinding(for edge: WellnessBreakTimeEdge) -> Binding<Date> {
+        Binding(
+            get: {
+                let minutes = edge == .start ? wellnessBreakStartMinutes : wellnessBreakEndMinutes
+                return timeOnlyDate(for: minutes)
+            },
+            set: { newDate in
+                let minutes = minutesSinceStartOfDay(for: newDate)
+                let sanitized: (startMinutes: Int, endMinutes: Int)
+                switch edge {
+                case .start:
+                    sanitized = AppSettings.sanitizeWellnessWorkHours(
+                        startMinutes: minutes,
+                        endMinutes: wellnessBreakEndMinutes
+                    )
+                case .end:
+                    sanitized = AppSettings.sanitizeWellnessWorkHours(
+                        startMinutes: wellnessBreakStartMinutes,
+                        endMinutes: minutes
+                    )
+                }
+                wellnessBreakStartMinutes = sanitized.startMinutes
+                wellnessBreakEndMinutes = sanitized.endMinutes
+            }
+        )
+    }
+
+    private func timeOnlyDate(for minutes: Int) -> Date {
+        let calendar = Calendar.current
+        var components = calendar.dateComponents([.year, .month, .day], from: .now)
+        components.hour = minutes / 60
+        components.minute = minutes % 60
+        components.second = 0
+        return calendar.date(from: components) ?? .now
+    }
+
+    private func minutesSinceStartOfDay(for date: Date) -> Int {
+        let calendar = Calendar.current
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        return (components.hour ?? 0) * 60 + (components.minute ?? 0)
+    }
+
+    private var wellnessDiagnosticsPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Live Status")
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                Spacer()
+                Text(wellnessBreakOverlayController.timerIsActive ? "Timer Active" : "Timer Inactive")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(wellnessBreakOverlayController.timerIsActive ? .green : .secondary)
+            }
+
+            diagnosticsRow(
+                label: "Next Break",
+                value: nextBreakStatusText()
+            )
+            diagnosticsRow(
+                label: "Last Overlay",
+                value: timestampText(for: wellnessBreakOverlayController.lastOverlayShownAt)
+            )
+            diagnosticsRow(
+                label: "Notification Status",
+                value: reminderScheduler.lastNotificationStatus
+            )
+            diagnosticsRow(
+                label: "Updated",
+                value: timestampText(for: reminderScheduler.lastNotificationUpdatedAt)
+            )
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+
+    private func diagnosticsRow(label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(label)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .frame(width: 120, alignment: .leading)
+
+            Text(value)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func nextBreakStatusText() -> String {
+        guard wellnessBreakOverlayController.timerIsActive else { return "Disabled" }
+        guard let nextTriggerDate = wellnessBreakOverlayController.nextTriggerDate else { return "Waiting for schedule" }
+        return timeText(for: nextTriggerDate)
+    }
+
+    private func timestampText(for date: Date?) -> String {
+        guard let date else { return "Never" }
+        return timeText(for: date)
+    }
+
+    private func timeText(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: date)
+    }
+
     private var soundMixerView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -1459,6 +1876,32 @@ struct PlannerRootView: View {
                         settingsDivider()
 
                         VStack(alignment: .leading, spacing: 16) {
+                            Text("Saved Mixes")
+                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+
+                            Button(backgroundAudioController.nextMixName.map { "Save As \($0)" } ?? "5 Mixes Saved") {
+                                backgroundAudioController.saveCurrentMixAsNextSlot()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!backgroundAudioController.canSaveNewMix)
+
+                            if !backgroundAudioController.savedMixes.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 12) {
+                                        ForEach(backgroundAudioController.savedMixes) { mix in
+                                            savedMixCard(for: mix)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 18)
+
+                        settingsDivider()
+
+                        VStack(alignment: .leading, spacing: 16) {
                             Text("Sound Tiles")
                                 .font(.system(size: 15, weight: .semibold, design: .rounded))
 
@@ -1496,6 +1939,37 @@ struct PlannerRootView: View {
         }
         .onAppear {
             backgroundAudioController.loadLibraryIfNeeded()
+        }
+    }
+
+    private func savedMixCard(for mix: SavedSoundMix) -> some View {
+        ZStack(alignment: .topTrailing) {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.75))
+
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.2), lineWidth: 1)
+
+            Text("Mix \(mix.slotNumber)")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+
+            Button {
+                pendingDeleteMixSlotNumber = mix.slotNumber
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .padding(8)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(width: 132, height: 68)
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onTapGesture {
+            backgroundAudioController.loadMix(from: mix.slotNumber)
         }
     }
 
@@ -1570,42 +2044,21 @@ struct PlannerRootView: View {
         .frame(height: 132)
     }
 
-    @ViewBuilder
-    private var backgroundAudioMiniBar: some View {
-        if backgroundAudioEnabled {
-            HStack(spacing: 10) {
-                Button {
-                    backgroundAudioController.togglePlayback()
-                } label: {
-                    Image(systemName: backgroundAudioController.isPlaying ? "pause.fill" : "play.fill")
-                }
-                .disabled(backgroundAudioController.activeSoundCount == 0)
+    private func exportSavedMixesJSON() {
+        let panel = NSSavePanel()
+        panel.title = "Export Saved Mixes"
+        panel.nameFieldStringValue = "focused-day-planner-mixes.json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Background Audio")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .lineLimit(1)
-                    Text(backgroundAudioController.isLoading ? "Loading effects..." : "\(backgroundAudioController.activeSoundCount) active tile\(backgroundAudioController.activeSoundCount == 1 ? "" : "s")")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(width: 170, alignment: .leading)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
 
-                Slider(
-                    value: Binding(
-                        get: { backgroundAudioController.masterVolume },
-                        set: { backgroundAudioController.setMasterVolume($0) }
-                    ),
-                    in: 0...1
-                )
-                .frame(width: 92)
-
-                if backgroundAudioController.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
+        do {
+            try backgroundAudioController.exportSavedMixesJSON(to: url)
+            dataTransferMessage = "Saved mixes exported:\n\(url.path)"
+        } catch {
+            dataTransferMessage = "Saved mix export failed: \(error.localizedDescription)"
         }
     }
 
@@ -1614,13 +2067,18 @@ struct PlannerRootView: View {
         let overallRating: Double? = ratedValues.isEmpty
             ? nil
             : Double(ratedValues.reduce(0) { $0 + $1 }) / Double(ratedValues.count)
-        let thisWeekDonePerDay = averageDonePerDay(weekOffsetFromCurrent: 0)
-        let previousWeekDonePerDay = averageDonePerDay(weekOffsetFromCurrent: -1)
-        let selectedWeek = weeklyRatingSummary(weekOffsetFromCurrent: weeklyRatingsOffset)
-        let thisWeekRating = weeklyAverageRating(weekOffsetFromCurrent: 0)
-        let previousWeekRating = weeklyAverageRating(weekOffsetFromCurrent: -1)
-        let ratingChangeText = weeklyRatingChangeText(current: thisWeekRating, previous: previousWeekRating)
-        let trendWeeks = weeklyRatingTrendSummaries(limit: 8)
+        let selectedOffset = statsSelectedOffset
+        let currentDonePerDay = averageDonePerDay(for: statsTimeframe, offsetFromCurrent: 0)
+        let previousDonePerDay = averageDonePerDay(for: statsTimeframe, offsetFromCurrent: -1)
+        let selectedSummary = ratingSummary(for: statsTimeframe, offsetFromCurrent: selectedOffset)
+        let currentRating = averageRating(for: statsTimeframe, offsetFromCurrent: 0)
+        let previousRating = averageRating(for: statsTimeframe, offsetFromCurrent: -1)
+        let ratingChangeText = ratingChangeText(current: currentRating, previous: previousRating)
+        let trendSummaries = ratingTrendSummaries(for: statsTimeframe, limit: 8)
+        let periodTitle = statsTimeframe.title
+        let periodLabel = statsTimeframe.singularLabel
+        let currentPeriodTitle = statsTimeframe == .weekly ? "This Week" : "This Month"
+        let previousPeriodTitle = statsTimeframe == .weekly ? "Previous Week" : "Previous Month"
 
         return ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -1638,32 +2096,39 @@ struct PlannerRootView: View {
                                 .font(.title3.weight(.semibold))
                         }
 
+                        Picker("Stats Timeframe", selection: $statsTimeframe) {
+                            ForEach(StatsTimeframe.allCases) { timeframe in
+                                Text(timeframe.title).tag(timeframe)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text("This Week's Rating")
+                            Text("\(currentPeriodTitle)'s Rating")
                                 .font(.title3)
                             Spacer()
-                            Text(thisWeekRating.map { String(format: "%.1f/10", $0) } ?? "-")
+                            Text(currentRating.map { String(format: "%.1f/10", $0) } ?? "-")
                                 .font(.title3.weight(.semibold))
                             if let ratingChangeText {
-                                Text("(\(ratingChangeText) from last week)")
+                                Text("(\(ratingChangeText) from last \(periodLabel))")
                                     .font(.subheadline.weight(.medium))
                                     .foregroundStyle(ratingChangeText.hasPrefix("+") ? .green : .secondary)
                             }
                         }
 
                         HStack {
-                            Text("Todos Done/Day (This Week)")
+                            Text("Todos Done/Day (\(currentPeriodTitle))")
                                 .font(.title3)
                             Spacer()
-                            Text(String(format: "%.1f", thisWeekDonePerDay))
+                            Text(String(format: "%.1f", currentDonePerDay))
                                 .font(.title3.weight(.semibold))
                         }
 
                         HStack {
-                            Text("Todos Done/Day (Previous Week)")
+                            Text("Todos Done/Day (\(previousPeriodTitle))")
                                 .font(.title3)
                             Spacer()
-                            Text(String(format: "%.1f", previousWeekDonePerDay))
+                            Text(String(format: "%.1f", previousDonePerDay))
                                 .font(.title3.weight(.semibold))
                         }
                     }
@@ -1672,37 +2137,37 @@ struct PlannerRootView: View {
                 sectionCard {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack {
-                            Text("Weekly Ratings")
+                            Text("\(periodTitle) Ratings")
                                 .font(.title2.weight(.semibold))
                             Spacer()
                             Button("Previous") {
-                                weeklyRatingsOffset -= 1
+                                adjustStatsOffset(by: -1)
                             }
                             .buttonStyle(.bordered)
-                            .disabled(weeklyRatingsOffset <= earliestRatedWeekOffset)
+                            .disabled(selectedOffset <= earliestRatedOffset(for: statsTimeframe))
 
                             Button("Next") {
-                                weeklyRatingsOffset += 1
+                                adjustStatsOffset(by: 1)
                             }
                             .buttonStyle(.bordered)
-                            .disabled(weeklyRatingsOffset >= 0)
+                            .disabled(selectedOffset >= 0)
                         }
 
-                        Text(selectedWeek.map { weekRangeLabel(for: $0.interval) } ?? "No ratings yet")
+                        Text(selectedSummary.map { intervalRangeLabel(for: $0.interval, timeframe: statsTimeframe) } ?? "No ratings yet")
                             .font(.headline)
                             .foregroundStyle(.secondary)
 
                         HStack(alignment: .firstTextBaseline) {
-                            Text(selectedWeek?.averageRating.map { String(format: "%.1f/10", $0) } ?? "-")
+                            Text(selectedSummary?.averageRating.map { String(format: "%.1f/10", $0) } ?? "-")
                                 .font(.system(size: 34, weight: .semibold))
                             Spacer()
-                            Text(selectedWeek.map { "\($0.ratedDaysCount) rated day\($0.ratedDaysCount == 1 ? "" : "s")" } ?? "")
+                            Text(selectedSummary.map { "\($0.ratedDaysCount) rated day\($0.ratedDaysCount == 1 ? "" : "s")" } ?? "")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
 
-                        if trendWeeks.isEmpty {
-                            Text("Add ratings to start seeing your weekly trend.")
+                        if trendSummaries.isEmpty {
+                            Text("Add ratings to start seeing your \(periodLabel)-by-\(periodLabel) trend.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         } else {
@@ -1710,24 +2175,24 @@ struct PlannerRootView: View {
                                 Text("Recent Trend")
                                     .font(.headline)
 
-                                ForEach(trendWeeks) { week in
+                                ForEach(trendSummaries) { summary in
                                     VStack(alignment: .leading, spacing: 6) {
                                         HStack {
-                                            Text(weekShortLabel(for: week.interval))
+                                            Text(intervalShortLabel(for: summary.interval, timeframe: statsTimeframe))
                                                 .font(.subheadline.weight(.medium))
                                             Spacer()
-                                            Text(week.averageRating.map { String(format: "%.1f", $0) } ?? "-")
+                                            Text(summary.averageRating.map { String(format: "%.1f", $0) } ?? "-")
                                                 .font(.subheadline.monospacedDigit())
-                                                .foregroundStyle(week.weekOffset == weeklyRatingsOffset ? .primary : .secondary)
+                                                .foregroundStyle(summary.offset == selectedOffset ? .primary : .secondary)
                                         }
 
                                         GeometryReader { proxy in
-                                            let value = CGFloat((week.averageRating ?? 0) / 10.0)
+                                            let value = CGFloat((summary.averageRating ?? 0) / 10.0)
                                             ZStack(alignment: .leading) {
                                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                                                     .fill(Color.secondary.opacity(0.12))
                                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                                    .fill(week.weekOffset == weeklyRatingsOffset ? Color.accentColor : Color.accentColor.opacity(0.45))
+                                                    .fill(summary.offset == selectedOffset ? Color.accentColor : Color.accentColor.opacity(0.45))
                                                     .frame(width: proxy.size.width * value)
                                             }
                                         }
@@ -1735,7 +2200,7 @@ struct PlannerRootView: View {
                                     }
                                     .contentShape(Rectangle())
                                     .onTapGesture {
-                                        openJournal(for: week.interval)
+                                        openJournal(for: summary.interval)
                                     }
                                 }
                             }
@@ -1767,7 +2232,7 @@ struct PlannerRootView: View {
                                 .font(scaledFont(14))
                                 .foregroundStyle(.secondary)
                             if let journalDateRange {
-                                Text("Showing notes for \(weekRangeLabel(for: journalDateRange))")
+                                Text("Showing notes for \(journalRangeLabel(for: journalDateRange))")
                                     .font(scaledFont(14, weight: .semibold))
                                     .foregroundStyle(.secondary)
                             }
@@ -1850,7 +2315,12 @@ struct PlannerRootView: View {
         journalDateRange = interval
         journalPage = 0
         detailMode = .journal
-        weeklyRatingsOffset = weekOffset(for: interval)
+        switch statsTimeframe {
+        case .weekly:
+            weeklyRatingsOffset = offset(for: interval, timeframe: .weekly)
+        case .monthly:
+            monthlyRatingsOffset = offset(for: interval, timeframe: .monthly)
+        }
     }
 
     private func journalDayCard(for plan: DayPlan) -> some View {
@@ -2582,34 +3052,52 @@ struct PlannerRootView: View {
         return Self.shortDayFormatter.string(from: date)
     }
 
-    private func averageDonePerDay(weekOffsetFromCurrent offset: Int) -> Double {
-        guard let thisWeekInterval = calendar.dateInterval(of: .weekOfYear, for: .now),
-              let start = calendar.date(byAdding: .weekOfYear, value: offset, to: thisWeekInterval.start),
-              let end = calendar.date(byAdding: .day, value: 7, to: start) else {
+    private var statsSelectedOffset: Int {
+        switch statsTimeframe {
+        case .weekly:
+            return weeklyRatingsOffset
+        case .monthly:
+            return monthlyRatingsOffset
+        }
+    }
+
+    private func adjustStatsOffset(by delta: Int) {
+        switch statsTimeframe {
+        case .weekly:
+            weeklyRatingsOffset += delta
+        case .monthly:
+            monthlyRatingsOffset += delta
+        }
+    }
+
+    private func averageDonePerDay(for timeframe: StatsTimeframe, offsetFromCurrent offset: Int) -> Double {
+        guard let interval = interval(for: timeframe, offsetFromCurrent: offset) else {
             return 0
         }
 
         let totalDone = dayPlans.reduce(into: 0) { partialResult, plan in
-            guard let date = store.date(from: plan.dateKey), date >= start, date < end else { return }
+            guard let date = store.date(from: plan.dateKey), interval.contains(date) else { return }
             partialResult += plan.todos.filter(\.isDone).count
         }
-        return Double(totalDone) / 7.0
+        let dayCount = max(1, calendar.dateComponents([.day], from: interval.start, to: interval.end).day ?? 1)
+        return Double(totalDone) / Double(dayCount)
     }
 
-    private func weekInterval(weekOffsetFromCurrent offset: Int) -> DateInterval? {
-        guard let thisWeekInterval = calendar.dateInterval(of: .weekOfYear, for: .now),
-              let start = calendar.date(byAdding: .weekOfYear, value: offset, to: thisWeekInterval.start) else {
+    private func interval(for timeframe: StatsTimeframe, offsetFromCurrent offset: Int) -> DateInterval? {
+        let component = timeframe.calendarComponent
+        guard let currentInterval = calendar.dateInterval(of: component, for: .now),
+              let start = calendar.date(byAdding: component, value: offset, to: currentInterval.start) else {
             return nil
         }
-        return calendar.dateInterval(of: .weekOfYear, for: start)
+        return calendar.dateInterval(of: component, for: start)
     }
 
-    private func weeklyAverageRating(weekOffsetFromCurrent offset: Int) -> Double? {
-        weeklyRatingSummary(weekOffsetFromCurrent: offset)?.averageRating
+    private func averageRating(for timeframe: StatsTimeframe, offsetFromCurrent offset: Int) -> Double? {
+        ratingSummary(for: timeframe, offsetFromCurrent: offset)?.averageRating
     }
 
-    private func weeklyRatingSummary(weekOffsetFromCurrent offset: Int) -> WeeklyRatingSummary? {
-        guard let interval = weekInterval(weekOffsetFromCurrent: offset) else { return nil }
+    private func ratingSummary(for timeframe: StatsTimeframe, offsetFromCurrent offset: Int) -> PeriodRatingSummary? {
+        guard let interval = interval(for: timeframe, offsetFromCurrent: offset) else { return nil }
         let ratings = dayPlans.compactMap { plan -> Int? in
             guard let rating = plan.dayRating,
                   let date = store.date(from: plan.dateKey),
@@ -2620,48 +3108,68 @@ struct PlannerRootView: View {
         }
 
         let averageRating = ratings.isEmpty ? nil : Double(ratings.reduce(0, +)) / Double(ratings.count)
-        return WeeklyRatingSummary(
-            weekOffset: offset,
+        return PeriodRatingSummary(
+            offset: offset,
             interval: interval,
             averageRating: averageRating,
             ratedDaysCount: ratings.count
         )
     }
 
-    private var earliestRatedWeekOffset: Int {
-        guard let currentWeekStart = weekInterval(weekOffsetFromCurrent: 0)?.start else {
+    private func earliestRatedOffset(for timeframe: StatsTimeframe) -> Int {
+        let component = timeframe.calendarComponent
+        guard let currentStart = interval(for: timeframe, offsetFromCurrent: 0)?.start else {
             return 0
         }
 
         let offsets = dayPlans.compactMap { plan -> Int? in
             guard plan.dayRating != nil,
                   let date = store.date(from: plan.dateKey),
-                  let weekStart = calendar.dateInterval(of: .weekOfYear, for: date)?.start else {
+                  let periodStart = calendar.dateInterval(of: component, for: date)?.start else {
                 return nil
             }
-            return calendar.dateComponents([.weekOfYear], from: currentWeekStart, to: weekStart).weekOfYear
+            switch timeframe {
+            case .weekly:
+                return calendar.dateComponents([.weekOfYear], from: currentStart, to: periodStart).weekOfYear
+            case .monthly:
+                return calendar.dateComponents([.month], from: currentStart, to: periodStart).month
+            }
         }
 
         return min(offsets.min() ?? 0, 0)
     }
 
-    private func weeklyRatingTrendSummaries(limit: Int) -> [WeeklyRatingSummary] {
+    private func ratingTrendSummaries(for timeframe: StatsTimeframe, limit: Int) -> [PeriodRatingSummary] {
         guard limit > 0 else { return [] }
-        let startOffset = max(earliestRatedWeekOffset, -(limit - 1))
-        return (startOffset...0).compactMap { weeklyRatingSummary(weekOffsetFromCurrent: $0) }
+        let startOffset = max(earliestRatedOffset(for: timeframe), -(limit - 1))
+        return (startOffset...0).compactMap { ratingSummary(for: timeframe, offsetFromCurrent: $0) }
     }
 
-    private func weekOffset(for interval: DateInterval) -> Int {
-        guard let currentWeekStart = weekInterval(weekOffsetFromCurrent: 0)?.start else {
+    private func offset(for dateInterval: DateInterval, timeframe: StatsTimeframe) -> Int {
+        guard let currentStart = interval(for: timeframe, offsetFromCurrent: 0)?.start else {
             return 0
         }
-        return calendar.dateComponents([.weekOfYear], from: currentWeekStart, to: interval.start).weekOfYear ?? 0
+        switch timeframe {
+        case .weekly:
+            return calendar.dateComponents([.weekOfYear], from: currentStart, to: dateInterval.start).weekOfYear ?? 0
+        case .monthly:
+            return calendar.dateComponents([.month], from: currentStart, to: dateInterval.start).month ?? 0
+        }
     }
 
-    private func weeklyRatingChangeText(current: Double?, previous: Double?) -> String? {
+    private func ratingChangeText(current: Double?, previous: Double?) -> String? {
         guard let current, let previous, previous != 0 else { return nil }
         let delta = ((current - previous) / previous) * 100
         return String(format: "%+.0f%%", delta)
+    }
+
+    private func intervalRangeLabel(for interval: DateInterval, timeframe: StatsTimeframe) -> String {
+        switch timeframe {
+        case .weekly:
+            return weekRangeLabel(for: interval)
+        case .monthly:
+            return Self.shortMonthFormatter.string(from: interval.start)
+        }
     }
 
     private func weekRangeLabel(for interval: DateInterval) -> String {
@@ -2669,12 +3177,30 @@ struct PlannerRootView: View {
         return "\(Self.shortDayFormatter.string(from: interval.start)) - \(Self.shortDayFormatter.string(from: endDate))"
     }
 
-    private func weekShortLabel(for interval: DateInterval) -> String {
-        Self.shortDayFormatter.string(from: interval.start)
+    private func intervalShortLabel(for interval: DateInterval, timeframe: StatsTimeframe) -> String {
+        switch timeframe {
+        case .weekly:
+            return Self.shortDayFormatter.string(from: interval.start)
+        case .monthly:
+            return Self.shortMonthFormatter.string(from: interval.start)
+        }
+    }
+
+    private func journalRangeLabel(for interval: DateInterval) -> String {
+        if let monthInterval = calendar.dateInterval(of: .month, for: interval.start),
+           calendar.isDate(monthInterval.start, inSameDayAs: interval.start),
+           calendar.isDate(monthInterval.end.addingTimeInterval(-1), inSameDayAs: interval.end.addingTimeInterval(-1)) {
+            return intervalRangeLabel(for: interval, timeframe: .monthly)
+        }
+        return intervalRangeLabel(for: interval, timeframe: .weekly)
     }
 
     private func clampWeeklyRatingsOffset() {
-        weeklyRatingsOffset = min(max(weeklyRatingsOffset, earliestRatedWeekOffset), 0)
+        weeklyRatingsOffset = min(max(weeklyRatingsOffset, earliestRatedOffset(for: .weekly)), 0)
+    }
+
+    private func clampMonthlyRatingsOffset() {
+        monthlyRatingsOffset = min(max(monthlyRatingsOffset, earliestRatedOffset(for: .monthly)), 0)
     }
 
     private func summaryText(for plan: DayPlan) -> String {
@@ -2684,13 +3210,13 @@ struct PlannerRootView: View {
     }
 }
 
-private struct WeeklyRatingSummary: Identifiable {
-    let weekOffset: Int
+private struct PeriodRatingSummary: Identifiable {
+    let offset: Int
     let interval: DateInterval
     let averageRating: Double?
     let ratedDaysCount: Int
 
-    var id: Int { weekOffset }
+    var id: Int { offset }
 }
 
 private struct StarRatingView: View {

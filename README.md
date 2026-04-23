@@ -2,6 +2,10 @@
 
 FocusedDayPlanner is a native macOS planner built with SwiftUI and SwiftData for people who want a calm daily workspace instead of a cluttered task app.
 
+## Agent Guide
+
+Repository-specific implementation notes for coding agents and new contributors live in [AGENTS.md](AGENTS.md).
+
 ![FocusedDayPlanner screenshot](.github/screenshot.png)
 
 ## What’s New In 1.1
@@ -28,7 +32,7 @@ FocusedDayPlanner is a native macOS planner built with SwiftUI and SwiftData for
 - day rating and written reflection
 - sidebar history of recent days
 - local-first data storage with JSON import/export
-- hourly todo reminders when work is still pending
+- configurable todo reminders with custom cadence and message text
 - optional wellness reminders every 10 to 180 minutes
 - dedicated sound mixer with click-to-balance and drag-to-set levels
 - sound-effect cache folder access from Settings
@@ -88,8 +92,8 @@ The sidebar artwork currently ships from `assets/overlays/image-*.png`.
 ## Notifications
 The app requests notification permission for planner reminders.
 
-- pending todos trigger hourly reminders from `11:00` through `17:00`
-- empty days can prompt you to add work for the day
+- pending todos trigger reminders between `11:00` and `17:00` using your chosen interval
+- both the unfinished-todo message and empty-day prompt can be customized in Settings
 - completed days do not trigger hourly todo reminders
 - wellness reminders can repeat on your chosen interval
 - test and permission-check actions are available in Settings
