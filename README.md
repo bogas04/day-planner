@@ -8,14 +8,12 @@ Repository-specific implementation notes for coding agents and new contributors 
 
 ![FocusedDayPlanner screenshot](.github/screenshot.png)
 
-## What’s New In 1.1
-- dedicated **Sound Mixer** page with mixable ambient sound-effect tiles
-- pause/resume that preserves your exact custom sound mix
-- sidebar page highlighting for planner destinations
-- menu bar launcher for quick reopen access
-- wellness-break overlays and reminder controls
-- UI zoom controls for better readability on different displays
-- refreshed settings layout and richer app polish
+## What’s New In 1.2
+- customizable todo reminder timing plus editable reminder messages for unfinished and empty-day prompts
+- wellness breaks now support custom messages, work-hour windows, and calmer full-screen break sessions
+- sound mixer saved mix slots with JSON export, plus a new windchimes ambience option
+- stats now support both weekly and monthly views for rating trends and completion patterns
+- developer mode diagnostics, updated sidebar artwork, and expanded media licensing documentation
 
 ## Core Experience
 - **Today** for focused day planning

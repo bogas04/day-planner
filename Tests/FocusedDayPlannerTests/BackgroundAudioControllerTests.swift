@@ -16,7 +16,7 @@ struct BackgroundAudioControllerTests {
         let ids = effects.map(\.id)
 
         #expect(Set(ids).count == ids.count)
-        #expect(effects.count == 7)
+        #expect(effects.count == 8)
         #expect(effects.allSatisfy { ["http", "https"].contains($0.pageURL.scheme?.lowercased() ?? "") })
         #expect(effects.allSatisfy { $0.sourceLabel == "Pixabay" })
     }
