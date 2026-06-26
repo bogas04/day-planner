@@ -8,7 +8,14 @@ Repository-specific implementation notes for coding agents and new contributors 
 
 ![FocusedDayPlanner screenshot](.github/screenshot.png)
 
-## What’s New In 1.2
+## Changelog
+
+### 1.3
+- packaging workflow now runs on `main` pushes and uploads the latest app/DMG artifacts
+- improved inactive button contrast across planner and wellness break controls
+- refreshed agent documentation for future maintenance
+
+### 1.2
 - customizable todo reminder timing plus editable reminder messages for unfinished and empty-day prompts
 - wellness breaks now support custom messages, work-hour windows, and calmer full-screen break sessions
 - sound mixer saved mix slots with JSON export, plus a new windchimes ambience option
